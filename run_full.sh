@@ -27,6 +27,7 @@ case "$phase" in
     echo "=== phase B: extraction on $VOID_MODEL ==="
     python tests/test_contrasts.py
     python tests/test_steering_hook.py
+    python tests/test_chat_kwargs.py
     python extract.py --stage all
     echo "=== phase B done. STOP THE POD. Vectors + layer sweep are on disk."
     ;;

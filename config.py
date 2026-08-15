@@ -54,6 +54,15 @@ PROTOTYPE_MODEL = "Qwen/Qwen3-0.6B"
 SCALE_TREND_MODEL = "Qwen/Qwen3-1.7B"
 
 DTYPE = _env_str("VOID_DTYPE", "bfloat16")  # bfloat16 | float16 | float32
+
+# Hybrid-thinking Qwen3 checkpoints (0.6B, 1.7B) open a <think> block on the
+# first generated token. That would put the P(True) read position on <think>
+# rather than on True/False, and would spend the answer budget on a truncated
+# reasoning trace. Qwen3-*-Instruct-2507 has no thinking mode and is unaffected.
+#   "auto"  -> disable thinking iff the chat template supports the flag
+#   "true"  -> leave thinking on
+#   "false" -> always disable
+ENABLE_THINKING = _env_str("VOID_ENABLE_THINKING", "auto").strip().lower()
 DEVICE = _env_str("VOID_DEVICE", "cuda")
 SEED = _env_int("VOID_SEED", 20260816)
 DETERMINISTIC = _env_bool("VOID_DETERMINISTIC", True)
@@ -200,12 +209,22 @@ def model_slug(model_name: str | None = None) -> str:
     return (model_name or MODEL_NAME).split("/")[-1].replace(".", "-")
 
 
+_THINKING_TAG = {"": ""}  # set by modelio once the template has been inspected
+
+
+def set_thinking_tag(disabled: bool) -> None:
+    """Recorded in every cache key so thinking / non-thinking runs never mix."""
+    _THINKING_TAG[""] = "th0" if disabled else ""
+
+
 def cache_key(stage: str, **parts) -> str:
-    """Cache keys always carry model, contrast version and seed.
+    """Cache keys always carry model, contrast version, seed and prompt mode.
 
     Callers add persona / context / layer as needed.
     """
     bits = [stage, model_slug(), f"cv{CONTRAST_VERSION}", f"s{SEED}"]
+    if _THINKING_TAG[""]:
+        bits.append(_THINKING_TAG[""])
     bits += [f"{k}-{v}" for k, v in sorted(parts.items()) if v is not None]
     return "_".join(str(b) for b in bits)
 

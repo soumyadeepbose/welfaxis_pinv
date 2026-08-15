@@ -85,6 +85,15 @@ def run_capture(lm: M.LM, n_pairs: int, force: bool = False) -> None:
         )
     if report["_special_tokens_in_bare"]:
         print(f"  [warn] special tokens present in bare path: {report['_special_tokens_in_bare']}")
+    if not report["_chat_read_positions_match"]:
+        raise RuntimeError(
+            "chat personas do not share a read position; the between-persona "
+            "cosines would be comparing different constructs."
+        )
+    if report["_hybrid_thinking_template"] and not report["_thinking_disabled"]:
+        print("  [warn] hybrid-thinking template with thinking ON: the model opens\n"
+              "         <think> at the read position, so the P(True) readout in Phase D\n"
+              "         will be a ratio of two distribution tails. Set VOID_ENABLE_THINKING=false.")
 
     for persona in P.PERSONAS:
         for ctx in ALL_CONTEXTS:

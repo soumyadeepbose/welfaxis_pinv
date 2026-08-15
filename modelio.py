@@ -44,6 +44,8 @@ class LM:
     name: str
     n_layers: int
     d_model: int
+    chat_kwargs: dict | None = None   # e.g. {"enable_thinking": False}
+    thinking_disabled: bool = False
 
     @property
     def device(self):
@@ -74,8 +76,36 @@ def load_model(name: str | None = None, device: str | None = None) -> LM:
     model.requires_grad_(False)
 
     cfg = model.config
-    return LM(model=model, tokenizer=tok, name=name,
-              n_layers=cfg.num_hidden_layers, d_model=cfg.hidden_size)
+    lm = LM(model=model, tokenizer=tok, name=name,
+            n_layers=cfg.num_hidden_layers, d_model=cfg.hidden_size)
+    resolve_chat_kwargs(lm)
+    return lm
+
+
+def resolve_chat_kwargs(lm: LM) -> dict:
+    """Decide once whether to pass `enable_thinking=False`, and record it.
+
+    Hybrid-thinking Qwen3 checkpoints open a <think> block on the first
+    generated token, which would put the P(True) read position on <think>
+    instead of on True/False. Detection is by template inspection rather than
+    by model name, so a renamed or fine-tuned checkpoint is handled correctly.
+    """
+    if lm.chat_kwargs is not None:
+        return lm.chat_kwargs
+    template = getattr(lm.tokenizer, "chat_template", None) or ""
+    supports = "enable_thinking" in template
+    mode = config.ENABLE_THINKING
+    disable = (mode == "false") or (mode == "auto" and supports)
+    lm.chat_kwargs = {"enable_thinking": False} if (disable and supports) else {}
+    lm.thinking_disabled = bool(lm.chat_kwargs)
+    config.set_thinking_tag(lm.thinking_disabled)
+    if lm.thinking_disabled:
+        print("  [chat] hybrid-thinking template detected: enable_thinking=False "
+              "(cache keys tagged 'th0')")
+    elif supports:
+        print("  [chat] hybrid-thinking template detected and LEFT ON by config; "
+              "the P(True) read position will sit on <think>")
+    return lm.chat_kwargs
 
 
 def candidate_layers(n_layers: int) -> list[int]:
@@ -109,7 +139,8 @@ def build_situation_prompt(lm: LM, persona: P.Persona, situation: str) -> str:
         messages.append({"role": "system", "content": persona.system_prompt})
     messages.append({"role": "user", "content": situation})
     return lm.tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        messages, tokenize=False, add_generation_prompt=True,
+        **resolve_chat_kwargs(lm)
     )
 
 
@@ -128,12 +159,13 @@ def encode_chat_with_mask(lm: LM, messages: list[dict], add_generation_prompt: b
     model's chat template actually emits rather than a guess about it.
     """
     tok = lm.tokenizer
+    ck = resolve_chat_kwargs(lm)
     prev: list[int] = []
     mask: list[bool] = []
     monotonic = True
     for i, msg in enumerate(messages):
         ids = tok.apply_chat_template(messages[: i + 1], tokenize=True,
-                                      add_generation_prompt=False)
+                                      add_generation_prompt=False, **ck)
         ids = list(ids)
         if ids[: len(prev)] != prev:
             monotonic = False
@@ -141,7 +173,8 @@ def encode_chat_with_mask(lm: LM, messages: list[dict], add_generation_prompt: b
         mask += [msg["role"] == "assistant"] * max(n_new, 0)
         prev = ids
     if add_generation_prompt:
-        ids = list(tok.apply_chat_template(messages, tokenize=True, add_generation_prompt=True))
+        ids = list(tok.apply_chat_template(messages, tokenize=True,
+                                           add_generation_prompt=True, **ck))
         if ids[: len(prev)] != prev:
             monotonic = False
         mask += [True] * max(len(ids) - len(prev), 0)
@@ -212,6 +245,15 @@ def tokenisation_report(lm: LM, situation: str) -> dict:
     out["_special_tokens_in_bare"] = [
         t for t in out["bare"]["head"] + bare_tail if t and t.startswith("<|")
     ]
+    template = getattr(lm.tokenizer, "chat_template", None) or ""
+    out["_hybrid_thinking_template"] = "enable_thinking" in template
+    out["_thinking_disabled"] = lm.thinking_disabled
+    out["_chat_kwargs"] = lm.chat_kwargs or {}
+    # every chat persona must share a read position, or the cross-persona
+    # cosines are comparing different constructs
+    tails = {p: tuple(out[p]["tail"][-3:]) for p in out
+             if isinstance(out[p], dict) and out[p].get("uses_chat_template")}
+    out["_chat_read_positions_match"] = len(set(tails.values())) == 1
     return out
 
 

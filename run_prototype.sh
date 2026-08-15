@@ -24,6 +24,7 @@ export VOID_RESULTS="${VOID_RESULTS:-$PWD/results/proto}"
 echo "=== phase A: prototype on $VOID_MODEL ==="
 python tests/test_contrasts.py
 python tests/test_steering_hook.py
+python tests/test_chat_kwargs.py
 python tests/test_pipeline_synthetic.py
 
 echo "--- extraction"
