@@ -1,0 +1,14 @@
+# Qwen3 needs transformers >= 4.51; the local dev box here has 4.46, which is
+# fine for the GPU-free stages and the synthetic pipeline test but will not load
+# the model. Pin on the pod / Colab.
+torch>=2.3
+transformers>=4.51
+accelerate>=0.30
+datasets>=2.19
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+matplotlib>=3.8
+# Optional. The pipeline uses plain HF forward hooks; nnsight is not required,
+# and TransformerLens is deliberately not used (unreliable Qwen3 support).
+# nnsight>=0.3
