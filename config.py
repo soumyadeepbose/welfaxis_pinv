@@ -209,12 +209,43 @@ def model_slug(model_name: str | None = None) -> str:
     return (model_name or MODEL_NAME).split("/")[-1].replace(".", "-")
 
 
-_THINKING_TAG = {"": ""}  # set by modelio once the template has been inspected
+_THINKING_TAG: dict[str, str] = {}
+
+
+def _prompt_mode_path() -> Path:
+    return CACHE / f"prompt_mode_{model_slug()}.json"
 
 
 def set_thinking_tag(disabled: bool) -> None:
-    """Recorded in every cache key so thinking / non-thinking runs never mix."""
-    _THINKING_TAG[""] = "th0" if disabled else ""
+    """Record the prompt mode in every cache key, and on disk.
+
+    Only `modelio` can resolve this (it inspects the chat template), but
+    `analyze.py` and the front half of `steer.py` need the same cache keys
+    without loading a model. So the resolution is persisted next to the cache
+    it labels, and read back lazily.
+    """
+    _THINKING_TAG[model_slug()] = "th0" if disabled else ""
+    try:
+        _prompt_mode_path().write_text(
+            json.dumps({"model": MODEL_NAME, "thinking_disabled": bool(disabled)}),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def thinking_tag() -> str:
+    slug = model_slug()
+    if slug not in _THINKING_TAG:
+        tag = ""
+        p = _prompt_mode_path()
+        if p.exists():
+            try:
+                tag = "th0" if json.loads(p.read_text(encoding="utf-8"))[
+                    "thinking_disabled"] else ""
+            except (OSError, ValueError, KeyError):
+                tag = ""
+        _THINKING_TAG[slug] = tag
+    return _THINKING_TAG[slug]
 
 
 def cache_key(stage: str, **parts) -> str:
@@ -223,8 +254,8 @@ def cache_key(stage: str, **parts) -> str:
     Callers add persona / context / layer as needed.
     """
     bits = [stage, model_slug(), f"cv{CONTRAST_VERSION}", f"s{SEED}"]
-    if _THINKING_TAG[""]:
-        bits.append(_THINKING_TAG[""])
+    if thinking_tag():
+        bits.append(thinking_tag())
     bits += [f"{k}-{v}" for k, v in sorted(parts.items()) if v is not None]
     return "_".join(str(b) for b in bits)
 

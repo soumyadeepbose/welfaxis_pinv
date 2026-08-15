@@ -64,8 +64,22 @@ class StubModel(nn.Module):
         return type("Out", (), {"hidden_states": tuple(states), "logits": h})()
 
 
+class Encoding:
+    """Stands in for a BatchEncoding: attribute access plus mapping access."""
+
+    def __init__(self, ids):
+        self.input_ids = ids
+
+    def __getitem__(self, k):
+        return getattr(self, k)
+
+
 class StubTok:
     pad_token_id = 0
+    chat_template = ""
+
+    def __init__(self, template_return="list"):
+        self.template_return = template_return
 
     def __call__(self, text, add_special_tokens=False, **__):
         ids = [ord(c) % 60 + 1 for c in text][:24]
@@ -74,10 +88,56 @@ class StubTok:
     def convert_ids_to_tokens(self, ids):
         return [f"t{i}" for i in ids]
 
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False, **__):
+        ids = []
+        for m in messages:
+            ids += [ord(c) % 60 + 1 for c in f"{m['role']}:{m['content']}"][:12]
+        if add_generation_prompt:
+            ids += [61, 62]
+        if not tokenize:
+            return "".join(f"<{m['role']}>{m['content']}" for m in messages)
+        return {                              # every shape transformers has returned
+            "list": lambda: ids,
+            "encoding": lambda: Encoding(ids),
+            "dict": lambda: {"input_ids": ids, "attention_mask": [1] * len(ids)},
+            "tensor": lambda: torch.tensor(ids),
+            "batch": lambda: Encoding([ids]),
+        }[self.template_return]()
 
-def _lm():
-    return M.LM(model=StubModel(), tokenizer=StubTok(), name="stub",
-                n_layers=N_LAYERS, d_model=D)
+
+def _lm(template_return="list"):
+    return M.LM(model=StubModel(), tokenizer=StubTok(template_return), name="stub",
+                n_layers=N_LAYERS, d_model=D, chat_kwargs={})
+
+
+def test_template_ids_normalises_every_return_shape():
+    """Regression: transformers changed apply_chat_template(tokenize=True) to
+    return a BatchEncoding. `list(result)` then yields dict *keys*, which reaches
+    torch.tensor as strings and dies with "too many dimensions 'str'"."""
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
+    ref = M.template_ids(_lm("list"), msgs, add_generation_prompt=True)
+    assert ref and all(isinstance(i, int) for i in ref)
+    for shape in ("encoding", "dict", "tensor", "batch"):
+        got = M.template_ids(_lm(shape), msgs, add_generation_prompt=True)
+        assert got == ref, (shape, got[:6], ref[:6])
+        assert all(isinstance(i, int) for i in got), shape
+    print("ok  template_ids normalises list / BatchEncoding / dict / tensor / batch")
+
+
+def test_chat_mask_survives_batchencoding_returns():
+    msgs = [{"role": "system", "content": "spec"},
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "check"}]
+    for shape in ("list", "encoding", "dict", "tensor"):
+        ids, mask = M.encode_chat_with_mask(_lm(shape), msgs, add_generation_prompt=True)
+        assert len(ids) == len(mask), shape
+        assert all(isinstance(i, int) for i in ids), shape
+        assert mask[-1] is True or mask[-1], shape   # read position is a model position
+        assert not mask[0], shape                    # system turn is not
+        # and the ids survive the pad/tensor round trip that used to crash
+        M.pad_batch(_lm(shape), [ids], [mask])
+    print("ok  encode_chat_with_mask + pad_batch survive every return shape")
 
 
 def test_hook_writes_to_the_layer_it_claims():

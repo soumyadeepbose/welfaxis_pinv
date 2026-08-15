@@ -70,7 +70,17 @@ def load_model(name: str | None = None, device: str | None = None) -> LM:
     tok.padding_side = "left"     # last position is the read position for every row
     tok.truncation_side = "left"  # never truncate away the read position itself
 
-    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype, device_map=None)
+    # `torch_dtype` was renamed to `dtype`; from_pretrained swallows unknown
+    # kwargs, so the loaded dtype is verified rather than assumed -- silently
+    # getting fp32 would quadruple memory and blow the pod budget.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(name, dtype=dtype, device_map=None)
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype, device_map=None)
+    got = next(model.parameters()).dtype
+    if got != dtype:
+        print(f"  [load] dtype kwarg ignored (got {got}); casting to {dtype}")
+        model = model.to(dtype)
     model.to(device)
     model.eval()
     model.requires_grad_(False)
@@ -152,29 +162,53 @@ def encode_batch(lm: LM, texts: list[str], max_len: int | None = None):
     return {k: v.to(lm.device) for k, v in enc.items()}
 
 
+def template_ids(lm: LM, messages: list[dict], add_generation_prompt: bool) -> list[int]:
+    """`apply_chat_template(tokenize=True)` -> a flat list of token ids.
+
+    Transformers changed the default return of this call from a list of ints to
+    a BatchEncoding, so the raw result may be a list, a tensor, a dict, or a
+    batch of any of those. Normalising here keeps every caller version-proof --
+    the alternative (`list(result)`) silently yields dict *keys*.
+    """
+    out = lm.tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=add_generation_prompt,
+        **resolve_chat_kwargs(lm)
+    )
+    if hasattr(out, "input_ids"):          # BatchEncoding
+        out = out.input_ids
+    elif isinstance(out, dict):
+        out = out["input_ids"]
+    if hasattr(out, "tolist"):             # tensor / ndarray
+        out = out.tolist()
+    out = list(out)
+    if out and isinstance(out[0], (list, tuple)):   # batch of one conversation
+        out = list(out[0])
+    if out and not isinstance(out[0], int):
+        raise TypeError(
+            f"apply_chat_template returned {type(out[0])!r} elements, not token ids; "
+            "transformers may have changed its return contract again"
+        )
+    return out
+
+
 def encode_chat_with_mask(lm: LM, messages: list[dict], add_generation_prompt: bool = True):
     """Token ids plus a boolean mask marking assistant-turn tokens.
 
     Built by tokenising message prefixes and diffing, so it follows whatever the
     model's chat template actually emits rather than a guess about it.
     """
-    tok = lm.tokenizer
-    ck = resolve_chat_kwargs(lm)
     prev: list[int] = []
     mask: list[bool] = []
     monotonic = True
     for i, msg in enumerate(messages):
-        ids = tok.apply_chat_template(messages[: i + 1], tokenize=True,
-                                      add_generation_prompt=False, **ck)
-        ids = list(ids)
+        ids = template_ids(lm, messages[: i + 1], add_generation_prompt=False)
         if ids[: len(prev)] != prev:
             monotonic = False
         n_new = len(ids) - len(prev)
         mask += [msg["role"] == "assistant"] * max(n_new, 0)
         prev = ids
     if add_generation_prompt:
-        ids = list(tok.apply_chat_template(messages, tokenize=True,
-                                           add_generation_prompt=True, **ck))
+        ids = template_ids(lm, messages, add_generation_prompt=True)
         if ids[: len(prev)] != prev:
             monotonic = False
         mask += [True] * max(len(ids) - len(prev), 0)

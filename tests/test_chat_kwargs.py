@@ -12,10 +12,15 @@ Run: python tests/test_chat_kwargs.py
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_TMP = Path(tempfile.mkdtemp(prefix="void_chatkw_"))
+os.environ["VOID_CACHE"] = str(_TMP / "cache")
+os.environ["VOID_RESULTS"] = str(_TMP / "results")
 os.environ.setdefault("VOID_DEVICE", "cpu")
 
 import config        # noqa: E402
@@ -36,6 +41,7 @@ def _lm(template):
 
 def _resolve(template, mode):
     config.ENABLE_THINKING = mode
+    config._THINKING_TAG.clear()
     config.set_thinking_tag(False)
     lm = _lm(template)
     return lm, M.resolve_chat_kwargs(lm)
@@ -77,6 +83,19 @@ def test_cache_keys_are_tagged_and_do_not_collide():
     print(f"ok  cache keys disjoint:\n      {hybrid_key}\n      {plain_key}")
 
 
+def test_tag_survives_without_a_loaded_model():
+    """analyze.py and the front of steer.py build cache keys before (or without)
+    loading a model. The prompt mode has to come back from disk, or they would
+    look for untagged filenames that extraction never wrote."""
+    _resolve(HYBRID, "auto")                       # extraction-time resolution
+    key_with_model = config.cache_key("vectors", n=200)
+    config._THINKING_TAG.clear()                   # fresh process, no model loaded
+    key_cold = config.cache_key("vectors", n=200)
+    assert key_cold == key_with_model, (key_cold, key_with_model)
+    assert "th0" in key_cold
+    print("ok  prompt-mode tag round-trips through disk for model-free stages")
+
+
 def test_resolution_is_sticky():
     lm, ck = _resolve(HYBRID, "auto")
     config.ENABLE_THINKING = "true"          # changed after the fact
@@ -93,4 +112,5 @@ if __name__ == "__main__":
         print(f"\n{len(fns)} chat-kwarg tests passed")
     finally:
         config.ENABLE_THINKING = original
-        config.set_thinking_tag(False)
+        config._THINKING_TAG.clear()
+        shutil.rmtree(_TMP, ignore_errors=True)

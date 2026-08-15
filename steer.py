@@ -474,6 +474,9 @@ def main() -> None:
     args = ap.parse_args()
 
     config.set_seed()
+    # load first: resolving the chat template fixes the prompt mode, and the
+    # prompt mode is part of every cache key the loads below depend on
+    lm = M.load_model(args.model)
     sweep = json.loads((config.RESULTS / "layer_sweep.json").read_text(encoding="utf-8"))
     layer = args.layer or sweep["l_star"]
     vec = E.build_vectors(args.n_pairs)
@@ -483,7 +486,6 @@ def main() -> None:
         print(f"  [warn] no bootstrap cache ({exc}); transfer CIs will omit extraction noise")
         boot = None
 
-    lm = M.load_model(args.model)
     print(f"[steer] {lm.name} L*={layer} alphas={config.ALPHAS} "
           f"unit={config.ALPHA_UNIT_FRAC} x median norm")
     rows = load_mmlu(max(args.n_mmlu, args.n_mmlu_transfer))
