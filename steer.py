@@ -343,7 +343,7 @@ def deflate_directions(dirs: dict[str, np.ndarray], vec: dict, layer: int
 def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dict],
               context: str | None, n_q: int, b_steer: int, force: bool = False,
               deadline: float | None = None, deflate: bool = False,
-              diagonal_only: bool = False) -> dict:
+              diagonal_only: bool = False, random_control: bool = False) -> dict:
     """Fill one persona x persona x alpha block; resumes from partial cache.
 
     `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
@@ -471,31 +471,42 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
                 cells[bkey] = {"slopes": slopes, "n_q": nb}
                 _save(path, state)
 
-        # functional null control for this steered persona
-        nkey = f"{pid}|_nullctl"
-        cells.setdefault(nkey, {})
-        inco.setdefault(nkey, {})
-        dn = torch.from_numpy(null_dirs[pid])
-        for alpha in config.ALPHAS:
-            a = f"{float(alpha)}"
-            if a in cells[nkey]:
-                continue
-            if float(alpha) == 0.0:
-                cells[nkey][a] = base[pid]["0.0"]
-                inco[nkey][a] = inco[f"{pid}|_baseline"]["0.0"]
-                continue
-            if deadline is not None and time.time() > deadline:
-                state["incomplete"] = True
+        # Controls for this steered persona.
+        #   _nullctl  a real semantic direction (tides vs masonry), same pipeline
+        #   _randctl  a random unit vector -- shares no extraction artifact at all.
+        # The pair separates a DIRECTION confound from a MAGNITUDE confound: if
+        # a random vector at the same magnitude moves the readout, the effect is
+        # about perturbation size, not about what was extracted.
+        controls = [("_nullctl", null_dirs[pid])]
+        if random_control:
+            rg = np.random.default_rng(config.SEED + 991 + pi)
+            controls.append(("_randctl", unit(rg.normal(
+                size=vec["v"].shape[-1]).astype(np.float32))))
+        for cname, cvec in controls:
+            nkey = f"{pid}|{cname}"
+            cells.setdefault(nkey, {})
+            inco.setdefault(nkey, {})
+            dn = torch.from_numpy(cvec)
+            for alpha in config.ALPHAS:
+                a = f"{float(alpha)}"
+                if a in cells[nkey]:
+                    continue
+                if float(alpha) == 0.0:
+                    cells[nkey][a] = base[pid]["0.0"]
+                    inco[nkey][a] = inco[f"{pid}|_baseline"]["0.0"]
+                    continue
+                if deadline is not None and time.time() > deadline:
+                    state["incomplete"] = True
+                    _save(path, state)
+                    return state
+                mag = M.alpha_to_magnitude(alpha, med)
+                s = ptrue_scores(lm, persona, rows, answers[pid], layer, dn, mag,
+                                 true_ids, false_ids)
+                cells[nkey][a] = float(np.mean(s))
+                inco[nkey][a] = incoherence_rate(lm, persona, rows, layer, dn, mag)
+                print(f"  [sweep {context or 'avg'}] {nkey} a={alpha:+.1f} "
+                      f"P(True)={cells[nkey][a]:.3f} inco={inco[nkey][a]['rate']:.2f}")
                 _save(path, state)
-                return state
-            mag = M.alpha_to_magnitude(alpha, med)
-            s = ptrue_scores(lm, persona, rows, answers[pid], layer, dn, mag,
-                             true_ids, false_ids)
-            cells[nkey][a] = float(np.mean(s))
-            inco[nkey][a] = incoherence_rate(lm, persona, rows, layer, dn, mag)
-            print(f"  [sweep {context or 'avg'}] {nkey} a={alpha:+.1f} "
-                  f"P(True)={cells[nkey][a]:.3f} inco={inco[nkey][a]['rate']:.2f}")
-            _save(path, state)
 
     state["cells"], state["incoherence"], state["baseline"] = cells, inco, base
     _save(path, state)
@@ -555,10 +566,12 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
     # functional null control: slope when persona p is steered with its own
     # null-contrast direction. Near zero => the readout responds to the welfare
     # direction specifically, not to any injected direction of that magnitude.
-    null_ctl = {}
+    null_ctl: dict = {}
+    rand_ctl: dict = {}
     for i, p in enumerate(personas):
-        cell = state["cells"].get(f"{p}|_nullctl", {})
-        inco = state["incoherence"].get(f"{p}|_nullctl", {})
+      for cname, store in (("_nullctl", null_ctl), ("_randctl", rand_ctl)):
+        cell = state["cells"].get(f"{p}|{cname}", {})
+        inco = state["incoherence"].get(f"{p}|{cname}", {})
         xs, ys = [], []
         for a, y in sorted(cell.items(), key=lambda kv: float(kv[0])):
             if not _keep(a):
@@ -571,7 +584,7 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
             sl, se = ols_slope(np.array(xs), np.array(ys))
             row = T[i][np.isfinite(T[i])]
             row_scale = float(np.mean(np.abs(row))) if row.size else float("nan")
-            null_ctl[p] = {
+            store[p] = {
                 "slope": sl, "se": se,
                 # ratio to the diagonal is unstable when a persona's own slope is
                 # near zero, so the row-mean comparison is reported alongside it
@@ -587,10 +600,15 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
         "ci95_halfwidth": (1.96 * total_sd).tolist(),
         "diagonal": diag.tolist(),
         "null_control": null_ctl,
+        "random_control": rand_ctl,
         "null_control_mean_ratio": (
             float(np.mean([v["ratio_to_own_diagonal"] for v in null_ctl.values()
                            if v["ratio_to_own_diagonal"] is not None]))
             if null_ctl else None),
+        "null_control_mean_slope": (
+            float(np.mean([v["slope"] for v in null_ctl.values()])) if null_ctl else None),
+        "random_control_mean_slope": (
+            float(np.mean([v["slope"] for v in rand_ctl.values()])) if rand_ctl else None),
         "masked_cells": masked,
         "incoherence_by_alpha": _inco_by_alpha(state),
         "context": state.get("context"), "layer": state.get("layer"),
@@ -632,6 +650,9 @@ def main() -> None:
     ap.add_argument("--diagonal-only", action="store_true",
                     help="steer each persona with its own vector and its null control "
                          "only; skips the off-diagonal cells")
+    ap.add_argument("--random-control", action="store_true",
+                    help="also steer each persona with a random unit vector: "
+                         "separates a magnitude confound from a direction confound")
     ap.add_argument("--budget-minutes", type=float, default=None,
                     help="stop cleanly at the next cell boundary after this long; "
                          "re-run the same command to resume")
@@ -659,7 +680,8 @@ def main() -> None:
     # headline: context-averaged vectors, full question set
     state = run_sweep(lm, layer, vec, boot, rows, None, args.n_mmlu, args.b_steer,
                       force=args.force, deadline=deadline, deflate=args.deflate,
-                      diagonal_only=args.diagonal_only)
+                      diagonal_only=args.diagonal_only,
+                      random_control=args.random_control)
     suffix = ("_deflated" if args.deflate else "") + ("_diag" if args.diagonal_only else "")
     config.dump_json(config.RESULTS / f"transfer_avg{suffix}.json",
                      transfer_from_sweep(state))
