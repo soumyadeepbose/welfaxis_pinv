@@ -634,10 +634,15 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
     null_ctl: dict = {}
     rand_ctl: dict = {}
     resid_ctl: dict = {}
-    res_ref = state.get("residual_ref")
     for i, p in enumerate(personas):
+      # The residual control key carries its reference persona, and older state
+      # files predate the field that records it, so the key is discovered by
+      # prefix rather than reconstructed.
+      resid_key = next((k for k in state["cells"]
+                        if k.startswith(f"{p}|_residctl")), None)
       for cname, store in (("_nullctl", null_ctl), ("_randctl", rand_ctl),
-                           (f"_residctl_{res_ref}" if res_ref else "_residctl", resid_ctl)):
+                           (resid_key.split("|", 1)[1] if resid_key else "_residctl",
+                            resid_ctl)):
         cell = state["cells"].get(f"{p}|{cname}", {})
         inco = state["incoherence"].get(f"{p}|{cname}", {})
         xs, ys = [], []
