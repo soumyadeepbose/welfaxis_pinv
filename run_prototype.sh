@@ -10,12 +10,12 @@ cd "$(dirname "$0")"
 export VOID_MODEL="${VOID_MODEL:-Qwen/Qwen3-0.6B}"
 export VOID_DTYPE="${VOID_DTYPE:-float16}"     # T4 has no bf16
 export VOID_N_PAIRS=20
-export VOID_N_MMLU=50
-export VOID_N_MMLU_TRANSFER=50
+export VOID_N_MMLU=30
 export VOID_B_BOOTSTRAP=20
-export VOID_B_STEER=3
-export VOID_N_MMLU_BOOT=20
-export VOID_N_COHERENCE=8
+export VOID_B_STEER=0            # skip CI propagation; this is a plumbing test
+export VOID_N_COHERENCE=6
+export VOID_COHERENCE_MAX_TOKENS=32
+export VOID_TRANSFER_PER_CONTEXT=false
 export VOID_EXTRACT_BATCH="${VOID_EXTRACT_BATCH:-8}"
 export VOID_STEER_BATCH="${VOID_STEER_BATCH:-4}"
 export VOID_CACHE="${VOID_CACHE:-$PWD/cache/proto}"

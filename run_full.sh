@@ -23,6 +23,27 @@ export VOID_STEER_BATCH="${VOID_STEER_BATCH:-8}"
 
 phase="${1:-help}"
 case "$phase" in
+  probe)
+    # Go/no-go on the real model at ~1/3 scale, in its own cache so it never
+    # collides with the full run. ~40 min on an A40, roughly $0.30. Answers the
+    # only question that matters before committing: does the gate pass and does
+    # steering move P(True) at all?
+    echo "=== probe: reduced-scale end-to-end on $VOID_MODEL ==="
+    export VOID_N_PAIRS=60 VOID_B_BOOTSTRAP=60 VOID_N_MMLU=40 VOID_B_STEER=0 \
+           VOID_N_COHERENCE=4 VOID_COHERENCE_MAX_TOKENS=32 \
+           VOID_TRANSFER_PER_CONTEXT=false \
+           VOID_CACHE="$PWD/cache/probe" VOID_RESULTS="$PWD/results/probe"
+    python extract.py --stage all
+    python analyze.py --skip-transfer
+    python steer.py --budget-minutes 25
+    python analyze.py
+    python plots.py --only fig1
+    python plots.py --only fig2
+    echo "=== probe done. STOP THE POD, then read:"
+    echo "    results/probe/null_gate.json      gate passed?"
+    echo "    results/probe/fig1_transfer_avg.png   any slope at all? degenerate?"
+    echo "    results/probe/summary.csv"
+    ;;
   extract)
     echo "=== phase B: extraction on $VOID_MODEL ==="
     python tests/test_contrasts.py

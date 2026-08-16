@@ -312,8 +312,15 @@ def sweep_path(context: str | None, n_q: int) -> Path:
 
 
 def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dict],
-              context: str | None, n_q: int, b_steer: int, force: bool = False) -> dict:
-    """Fill one persona x persona x alpha block; resumes from partial cache."""
+              context: str | None, n_q: int, b_steer: int, force: bool = False,
+              deadline: float | None = None) -> dict:
+    """Fill one persona x persona x alpha block; resumes from partial cache.
+
+    `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
+    next cell boundary, marks the state incomplete and returns. Re-running the
+    same command resumes exactly where it stopped -- pod hours are the budget,
+    so overrunning silently is worse than stopping early.
+    """
     path = sweep_path(context, n_q)
     state = json.loads(path.read_text(encoding="utf-8")) if (path.exists() and not force) else {
         "context": context, "n_q": n_q, "layer": layer, "alphas": list(config.ALPHAS),
@@ -329,6 +336,10 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     rows = rows[:n_q]
 
     answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
+
+    n_alpha = len([a for a in config.ALPHAS if float(a) != 0.0])
+    total_cells = len(personas) ** 2 * n_alpha
+    done, durs = 0, []
 
     for pi, pid in enumerate(personas):
         persona = P.get(pid)
@@ -356,21 +367,32 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
                     cells[key][a] = base[pid]["0.0"]
                     inco[key][a] = inco[f"{pid}|_baseline"]["0.0"]
                     continue
+                if deadline is not None and time.time() > deadline:
+                    state["incomplete"] = True
+                    _save(path, state)
+                    print(f"  [sweep {context or 'avg'}] budget reached at {done} cells; "
+                          f"state saved -- re-run the same command to resume")
+                    return state
                 mag = M.alpha_to_magnitude(alpha, med)
                 t0 = time.time()
                 s = ptrue_scores(lm, persona, rows, answers[pid], layer, d, mag,
                                  true_ids, false_ids)
                 cells[key][a] = float(np.mean(s))
                 inco[key][a] = incoherence_rate(lm, persona, rows, layer, d, mag)
+                dt = time.time() - t0
+                done += 1
+                durs.append(dt)
+                eta = float(np.mean(durs[-8:])) * max(total_cells - done, 0) / 60.0
                 print(f"  [sweep {context or 'avg'}] {key} a={alpha:+.1f} "
                       f"P(True)={cells[key][a]:.3f} inco={inco[key][a]['rate']:.2f} "
-                      f"({time.time() - t0:.0f}s)")
+                      f"({dt:.0f}s) [{done}/{total_cells}, eta {eta:.0f}m]")
                 _save(path, state)
 
             # bootstrap replicates on a reduced question subset -> extraction
             # noise propagated into the transfer CI
             bkey = f"boot::{key}"
-            if bdirs and bkey not in cells:
+            if bdirs and bkey not in cells and not (
+                    deadline is not None and time.time() > deadline):
                 nb = min(config.N_MMLU_BOOT, n_q)
                 slopes = []
                 for rep in bdirs[qid]:
@@ -470,8 +492,12 @@ def main() -> None:
     ap.add_argument("--layer", type=int, default=None, help="override L*")
     ap.add_argument("--per-context", action="store_true", default=config.TRANSFER_PER_CONTEXT)
     ap.add_argument("--no-per-context", dest="per_context", action="store_false")
+    ap.add_argument("--budget-minutes", type=float, default=None,
+                    help="stop cleanly at the next cell boundary after this long; "
+                         "re-run the same command to resume")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
+    deadline = time.time() + 60.0 * args.budget_minutes if args.budget_minutes else None
 
     config.set_seed()
     # load first: resolving the chat template fixes the prompt mode, and the
@@ -492,14 +518,22 @@ def main() -> None:
 
     # headline: context-averaged vectors, full question set
     state = run_sweep(lm, layer, vec, boot, rows, None, args.n_mmlu, args.b_steer,
-                      force=args.force)
+                      force=args.force, deadline=deadline)
     config.dump_json(config.RESULTS / "transfer_avg.json", transfer_from_sweep(state))
 
-    if args.per_context:
+    if state.get("incomplete"):
+        print("[steer] headline sweep incomplete -- per-context matrices skipped. "
+              "Re-run to resume; the partial transfer_avg.json is already usable.")
+    elif args.per_context:
+        # appendix only, and 4x the cost of the headline: never at the expense
+        # of the figure the paper is built on
         for ctx in config.CONTEXTS:
             st = run_sweep(lm, layer, vec, boot, rows, ctx, args.n_mmlu_transfer,
-                           args.b_steer, force=args.force)
+                           args.b_steer, force=args.force, deadline=deadline)
             config.dump_json(config.RESULTS / f"transfer_{ctx}.json", transfer_from_sweep(st))
+            if st.get("incomplete"):
+                print(f"[steer] budget reached during context '{ctx}'; stopping.")
+                break
 
     print("[steer] done -- stop the pod.")
 

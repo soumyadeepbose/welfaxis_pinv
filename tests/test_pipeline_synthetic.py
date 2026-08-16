@@ -156,6 +156,17 @@ def main() -> int:
           f"{eff['main_effect_prior_density']['estimate']:+.3f} "
           f"CI {np.round(eff['main_effect_prior_density']['ci95'], 3).tolist()}")
 
+    dim = A.effective_dimension(vec, boot, l_star, personas, wc)
+    # The plant spans {shared} u {idio_p : 5 personas} = 6 directions, and context
+    # adds none. So the participation ratio must land near 6 and clearly above the
+    # one-direction null -- this is what pins the estimator to a known answer.
+    assert dim["participation_ratio"] > dim["participation_ratio_null"]["p97.5"], dim
+    assert 4.0 < dim["participation_ratio"] < 9.0, (
+        f"PR={dim['participation_ratio']:.2f}, planted rank is 6")
+    print(f"ok  dimensionality PR={dim['participation_ratio']:.2f} (planted rank 6) "
+          f"vs null p97.5={dim['participation_ratio_null']['p97.5']:.2f}, "
+          f"{dim['n_components_90pct']} components to 90%")
+
     # --- steering-side maths on a fabricated sweep --------------------------
     for label, shared in (("avg", True), ("diagonal", False)):
         st = make_sweep_state(l_star, shared_substrate=shared)
@@ -174,6 +185,11 @@ def main() -> int:
         print(f"ok  transfer[{label}]  mean off-diagonal T_norm = {np.nanmean(off):.3f}, "
               f"{len(T['masked_cells'])} cells masked")
 
+    rank = A.transfer_rank()
+    assert rank and rank["rank1_variance_explained"] > 0.5, rank
+    print(f"ok  transfer_rank  rank-1 explains "
+          f"{rank['rank1_variance_explained']:.3f} -> {rank['reading']}")
+
     readings = A.interpret(A.tabulate_transfer())
     assert readings and "shared substrate" in readings[0], readings
     print("ok  interpret     " + readings[0])
@@ -182,9 +198,11 @@ def main() -> int:
     config.dump_json(config.RESULTS / "variance.json", var)
     config.dump_json(config.RESULTS / "factorial.json", fac)
     config.dump_json(config.RESULTS / "null_gate.json", gate)
+    config.dump_json(config.RESULTS / "dimensionality.json", dim)
 
     A.write_summary_csv({"null_gate": gate, "geometry": geo, "variance": var,
-                         "factorial": fac, "transfer": A.tabulate_transfer()})
+                         "factorial": fac, "transfer": A.tabulate_transfer(),
+                         "dimensionality": dim, "transfer_rank": rank})
     assert (config.RESULTS / "summary.csv").exists()
     print("ok  summary.csv")
 
@@ -196,9 +214,11 @@ def main() -> int:
     plots.fig3_alpha_curves("avg")
     plots.fig4_layer_sweep()
     plots.fig5_variance()
+    plots.fig6_dimensionality()
     made = sorted(p.name for p in config.RESULTS.glob("*.png"))
     for expect in ("fig1_transfer_avg.png", "fig2_cosine.png",
-                   "fig3_alpha_curves_avg.png", "fig4_layer_sweep.png"):
+                   "fig3_alpha_curves_avg.png", "fig4_layer_sweep.png",
+                   "fig6_dimensionality.png"):
         assert expect in made, (expect, made)
     print(f"ok  figures       {made}")
 

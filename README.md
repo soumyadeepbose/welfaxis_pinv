@@ -90,6 +90,14 @@ Read in this order once it finishes: `tokenisation_report.json` (is the bare pat
 distinct? is thinking disabled?), `contrast_audit.json` (token deltas), `layer_sweep.json`
 (is L\* interior, not pinned to an endpoint?), `null_gate.json`, then the four figures.
 
+**Go/no-go probe on the real model** (`run_full.sh probe`, ~40 min, ~$0.30). Reduced
+scale, isolated cache, end to end. Run this before committing to Phase B — it answers
+whether the gate passes and whether steering moves P(True) at all:
+
+```bash
+cd void_test && export VOID_MODEL=Qwen/Qwen3-4B-Instruct-2507 VOID_DTYPE=bfloat16 VOID_N_PAIRS=60 VOID_B_BOOTSTRAP=60 VOID_N_MMLU=40 VOID_B_STEER=0 VOID_N_COHERENCE=4 VOID_COHERENCE_MAX_TOKENS=32 VOID_TRANSFER_PER_CONTEXT=false VOID_EXTRACT_BATCH=16 VOID_STEER_BATCH=8 VOID_CACHE=$PWD/cache/probe VOID_RESULTS=$PWD/results/probe && python extract.py --stage all && python analyze.py --skip-transfer && python steer.py --budget-minutes 25 && python analyze.py && python plots.py --only fig1 && python plots.py --only fig2 && echo "PROBE DONE -- STOP THE POD"
+```
+
 **Phase B — extraction on the pod** (`run_full.sh extract`, ~1h, then STOP THE POD):
 
 ```bash
@@ -105,7 +113,7 @@ cd void_test && export VOID_MODEL=Qwen/Qwen3-4B-Instruct-2507 VOID_N_PAIRS=200 &
 **Phase D — steering sweep on the pod** (`run_full.sh steer`, ~2h, then STOP THE POD):
 
 ```bash
-cd void_test && export VOID_MODEL=Qwen/Qwen3-4B-Instruct-2507 VOID_DTYPE=bfloat16 VOID_N_PAIRS=200 VOID_N_MMLU=500 VOID_N_MMLU_TRANSFER=150 VOID_STEER_BATCH=8 && python steer.py && echo "PHASE D DONE -- STOP THE POD IMMEDIATELY"
+cd void_test && export VOID_MODEL=Qwen/Qwen3-4B-Instruct-2507 VOID_DTYPE=bfloat16 VOID_N_PAIRS=200 VOID_N_MMLU=500 VOID_STEER_BATCH=8 && python steer.py --budget-minutes 120 && echo "PHASE D DONE -- STOP THE POD IMMEDIATELY"
 ```
 
 **Phase E — analysis and figures** (`run_full.sh report`; free, no GPU):
@@ -174,6 +182,13 @@ Reported in the main text, not an appendix:
 - **Layer indexing.** `h[0]` embeddings, `h[i]` input to block `i`, `h[n]` post-final-norm.
   Steering "at layer L" writes to the output of block `L-1`, i.e. exactly the tensor read
   as `h[L]`. Block 0 and the post-norm state are excluded from the candidate set.
+- **Dimensionality is reported two ways, both free.** *Representational*: the
+  participation ratio of the 20 cell directions, read against a null in which all cells
+  share one direction and differ only by their own bootstrap noise (Fig 6). *Functional*:
+  the effective rank of `T` — a rank-1 fit `T[p][q] ≈ r_p · c_q` means one axis with a
+  per-persona gain and no pair-specific structure. Report the participation ratio, not
+  `n_components_above_null`, which is a liberal upper bound. Neither measures the
+  intrinsic dimension of welfare *within* a cell; difference-in-means cannot recover that.
 - **Transfer CIs.** `T[p][q]` is an OLS slope over the alpha grid; its interval combines
   the OLS standard error with the spread of slopes recomputed from `B_STEER` bootstrap
   *vector* replicates on a reduced question subset. Full `B=200` through the steering

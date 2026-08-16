@@ -318,6 +318,123 @@ def factorial(vec: dict, boot: dict, layer: int, personas: list[str], wc: list[i
 # --------------------------------------------------------------------------
 
 
+def effective_dimension(vec: dict, boot: dict, layer: int, personas: list[str],
+                        wc: list[int]) -> dict:
+    """How many dimensions are needed to span the 20 cell directions?
+
+    This is a *representational* dimensionality across cells, not the intrinsic
+    dimension of welfare within a cell -- difference-in-means yields one vector
+    per cell by construction, so a within-cell subspace is not recoverable here
+    and is not claimed.
+
+    The spectrum alone is uninterpretable, because extraction noise inflates
+    every trailing component. So it is read against a null in which all 20 cells
+    share ONE true direction and differ only by their own bootstrap noise. A
+    component counts as real only if its variance share clears that null's 97.5th
+    percentile at the same index.
+    """
+    v = vec["v"][:, wc, layer, :].astype(np.float64)          # [P, C, d]
+    b = boot["boot"][:, wc, :, :].astype(np.float64)          # [P, C, B, d]
+    P_, C_, d = v.shape
+    U = _unit(v).reshape(P_ * C_, d)
+
+    def _spec(M):
+        s = np.linalg.svd(M, compute_uv=False)
+        e = s ** 2
+        tot = float(e.sum()) + 1e-12
+        share = e / tot
+        return share, float(tot ** 2 / (np.sum(e ** 2) + 1e-12))   # participation ratio
+
+    share, pr = _spec(U)
+
+    # null: one shared direction + each cell's own extraction noise
+    grand = _unit(v.reshape(-1, d).mean(axis=0))
+    B = b.shape[2]
+    null_shares, null_prs = [], []
+    rng = np.random.default_rng(config.SEED + 11)
+    for _ in range(min(B, 200)):
+        rows = []
+        for i in range(P_):
+            for c in range(C_):
+                k = int(rng.integers(0, B))
+                resid = _unit(b[i, c, k]) - _unit(v[i, c])   # noise of this cell
+                rows.append(_unit(grand + resid))
+            # (grand direction perturbed by the cell's own resampling noise)
+        s_null, pr_null = _spec(np.array(rows))
+        null_shares.append(s_null)
+        null_prs.append(pr_null)
+    null_shares = np.array(null_shares)
+    hi = np.percentile(null_shares, 97.5, axis=0)
+
+    n_sig = int(np.sum(share[: len(hi)] > hi))
+    cum = np.cumsum(share)
+    n90 = int(np.searchsorted(cum, 0.90) + 1)
+    return {
+        "layer": layer,
+        "n_cells": P_ * C_,
+        "variance_share": share[:10].tolist(),
+        "cumulative_share": cum[:10].tolist(),
+        "null_share_p97.5": hi[:10].tolist(),
+        # headline statistic: the standard effective-dimension estimator
+        "participation_ratio": pr,
+        "participation_ratio_null": {
+            "p2.5": float(np.percentile(null_prs, 2.5)),
+            "p50": float(np.percentile(null_prs, 50)),
+            "p97.5": float(np.percentile(null_prs, 97.5)),
+        },
+        "n_components_90pct": n90,
+        "n_components_above_null": n_sig,
+        "pc1_share": float(share[0]),
+        "note": (
+            "Report the participation ratio against its null interval: that is the "
+            "effective number of distinct directions among the cell vectors. "
+            "n_components_above_null is a LIBERAL upper bound and should not be the "
+            "headline -- in a one-shared-direction null, PC1 absorbs nearly all the "
+            "variance, leaving a tiny per-component noise share that most observed "
+            "components clear. This measures dimensionality ACROSS cells, not the "
+            "intrinsic dimension of welfare within a cell, which difference-in-means "
+            "cannot recover."),
+    }
+
+
+def transfer_rank(transfer_path: Path | None = None) -> dict:
+    """Is T functionally one-dimensional?
+
+    T[p][q] ~ r_p * c_q means every persona has a steerability gain, every vector
+    has a quality, and nothing depends on the pairing -- a single functional axis.
+    A rank-1 fit that leaves residuals inside their own 95% CIs is much stronger
+    evidence than a mean off-diagonal, because it constrains all 25 cells at once.
+    """
+    path = transfer_path or (config.RESULTS / "transfer_avg.json")
+    if not Path(path).exists():
+        return {}
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
+    T = np.array(d["T"], dtype=float)
+    ci = np.array(d.get("ci95_halfwidth", np.zeros_like(T)), dtype=float)
+    ok = np.isfinite(T)
+    if ok.sum() < T.size - 2:      # too many masked cells to factorise
+        return {"rank1_fit": None, "reason": "too many masked cells"}
+
+    M = np.where(ok, T, np.nanmean(T[ok]))
+    U, s, Vt = np.linalg.svd(M)
+    rank1 = s[0] * np.outer(U[:, 0], Vt[0])
+    resid = M - rank1
+    within = np.abs(resid) <= np.where(np.isfinite(ci) & (ci > 0), ci, np.inf)
+    return {
+        "singular_values": s.tolist(),
+        "rank1_variance_explained": float(s[0] ** 2 / np.sum(s ** 2)),
+        "rank2_cumulative": float(np.sum(s[:2] ** 2) / np.sum(s ** 2)),
+        "row_factor": dict(zip(d["personas"], (U[:, 0] * np.sqrt(s[0])).tolist())),
+        "col_factor": dict(zip(d["personas"], (Vt[0] * np.sqrt(s[0])).tolist())),
+        "max_abs_residual": float(np.max(np.abs(resid))),
+        "residuals_within_ci": bool(within.all()),
+        "n_residuals_outside_ci": int((~within).sum()),
+        "reading": ("rank-1 suffices: one functional axis with per-persona gain"
+                    if float(s[0] ** 2 / np.sum(s ** 2)) > 0.90
+                    else "rank-1 insufficient: pair-specific structure in T"),
+    }
+
+
 def tabulate_transfer() -> dict:
     out = {}
     for path in sorted(config.RESULTS.glob("transfer_*.json")):
@@ -399,6 +516,22 @@ def write_summary_csv(payload: dict) -> Path:
     for k, val in v.items():
         add("variance", k, round(float(val), 4), "noise-corrected fraction")
 
+    if "dimensionality" in payload:
+        dm = payload["dimensionality"]
+        add("dimensionality", "participation_ratio", round(dm["participation_ratio"], 4),
+            f"null 95% [{dm['participation_ratio_null']['p2.5']:.2f}, "
+            f"{dm['participation_ratio_null']['p97.5']:.2f}] -- headline statistic")
+        add("dimensionality", "pc1_variance_share", round(dm["pc1_share"], 4))
+        add("dimensionality", "n_components_90pct", dm["n_components_90pct"])
+        add("dimensionality", "n_components_above_null", dm["n_components_above_null"],
+            "liberal upper bound, not the headline")
+    if "transfer_rank" in payload and payload["transfer_rank"].get("singular_values"):
+        tr = payload["transfer_rank"]
+        add("transfer_rank", "rank1_variance_explained",
+            round(tr["rank1_variance_explained"], 4), tr["reading"])
+        add("transfer_rank", "residuals_within_ci", tr["residuals_within_ci"],
+            f"{tr['n_residuals_outside_ci']} cells outside their 95% CI")
+
     for metric, eff in payload["factorial"]["effects"].items():
         for name, e in eff.items():
             add("factorial", f"{metric}:{name}", round(e["estimate"], 4),
@@ -461,13 +594,30 @@ def main() -> None:
     geo = geometry(vec, boot, layer, personas, wc, floor)
     var = variance_decomposition(vec, boot, layer, personas, wc)
     fac = factorial(vec, boot, layer, personas, wc)
+    dim = effective_dimension(vec, boot, layer, personas, wc)
     config.dump_json(config.RESULTS / "geometry.json", geo)
     config.dump_json(config.RESULTS / "variance.json", var)
     config.dump_json(config.RESULTS / "factorial.json", fac)
+    config.dump_json(config.RESULTS / "dimensionality.json", dim)
+    print(f"[analyze] effective dim across cells: participation ratio "
+          f"{dim['participation_ratio']:.2f} vs null median "
+          f"{dim['participation_ratio_null']['p50']:.2f} "
+          f"[{dim['participation_ratio_null']['p2.5']:.2f}, "
+          f"{dim['participation_ratio_null']['p97.5']:.2f}]; "
+          f"PC1 = {dim['pc1_share']:.2f}, {dim['n_components_90pct']} components to 90%")
 
-    payload = {"null_gate": gate, "geometry": geo, "variance": var, "factorial": fac}
+    payload = {"null_gate": gate, "geometry": geo, "variance": var, "factorial": fac,
+               "dimensionality": dim}
     if not args.skip_transfer:
         payload["transfer"] = tabulate_transfer()
+        rank = transfer_rank()
+        if rank:
+            payload["transfer_rank"] = rank
+            config.dump_json(config.RESULTS / "transfer_rank.json", rank)
+            if rank.get("rank1_variance_explained") is not None:
+                print(f"[analyze] T rank-1 explains "
+                      f"{rank['rank1_variance_explained']:.3f} of variance -> "
+                      f"{rank['reading']}")
         if payload["transfer"]:
             lines = interpret(payload["transfer"])
             config.dump_json(config.RESULTS / "transfer_summary.json",

@@ -151,22 +151,26 @@ ALPHAS = (-4.0, -2.0, 0.0, 2.0, 4.0)
 # vector (which differs systematically across personas).
 ALPHA_UNIT_FRAC = _env_float("VOID_ALPHA_UNIT_FRAC", 0.1)
 
-# Per-context transfer matrices are 4x the cost of the context-averaged
-# headline. Defaults keep Phase D inside ~2 pod-hours.
+# Per-context transfer matrices cost 4x the context-averaged headline for an
+# appendix figure, so they are OFF by default: run them only if Phase D came in
+# under budget. One sweep is 25 (persona x source) cells x 4 non-zero alphas.
 N_MMLU_TRANSFER = _env_int("VOID_N_MMLU_TRANSFER", 150)  # per-context matrices
-TRANSFER_PER_CONTEXT = _env_bool("VOID_TRANSFER_PER_CONTEXT", True)
+TRANSFER_PER_CONTEXT = _env_bool("VOID_TRANSFER_PER_CONTEXT", False)
 # Bootstrap vector replicates pushed through the *steering* sweep. Full B=200
 # is infeasible; this many replicates on a reduced question subset propagates
 # extraction noise into the transfer CIs. Reported as an approximation.
-B_STEER = _env_int("VOID_B_STEER", 5)
-N_MMLU_BOOT = _env_int("VOID_N_MMLU_BOOT", 60)
+B_STEER = _env_int("VOID_B_STEER", 4)
+N_MMLU_BOOT = _env_int("VOID_N_MMLU_BOOT", 48)
 
 # --------------------------------------------------------------------------
 # incoherence logging
 # --------------------------------------------------------------------------
 
-N_COHERENCE = _env_int("VOID_N_COHERENCE", 50)  # generations scored per (cell, alpha)
-COHERENCE_MAX_TOKENS = _env_int("VOID_COHERENCE_MAX_TOKENS", 64)
+# Generation is sequential and dominates per-cell cost: this is the single most
+# expensive knob in Phase D. 16 samples is enough to separate "coherent" from
+# ">90% degenerate", which is all the masking rule needs.
+N_COHERENCE = _env_int("VOID_N_COHERENCE", 16)  # generations scored per (cell, alpha)
+COHERENCE_MAX_TOKENS = _env_int("VOID_COHERENCE_MAX_TOKENS", 48)
 INCOHERENCE_MASK_RATE = _env_float("VOID_INCOHERENCE_MASK_RATE", 0.90)
 # heuristic thresholds
 REPETITION_MAX = 0.55        # fraction of repeated 3-grams

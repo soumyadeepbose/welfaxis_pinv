@@ -90,6 +90,16 @@ interaction `[[var_interaction]]` (noise-corrected).
 **The 2x2.** spec-density main effect `[[eff_spec]]`, prior-density main effect
 `[[eff_prior]]`, interaction `[[eff_int]]` (bootstrap 95% CIs).
 
+**One axis or several? (Fig 6).** Representational: participation ratio across the 20
+cell directions = `[[pr]]`, against a one-direction-plus-noise null of
+`[[pr_null_lo]]`–`[[pr_null_hi]]`; PC1 carries `[[pc1]]` of the variance. Functional: a
+rank-1 fit to `T` explains `[[rank1_ve]]` of its variance, with `[[n_outside]]` cells
+falling outside their own 95% CIs. Rank-1 holding means every persona has a steerability
+gain and every vector a quality, with nothing depending on the pairing — a single
+functional axis. Note the scope: this is dimensionality *across cells*. Difference-in-
+means yields one vector per cell by construction, so the intrinsic dimension of welfare
+within a condition is not recoverable here and is not claimed.
+
 **Scale (if run).** `[[scale_sentence]]`
 
 ## 6. Limitations

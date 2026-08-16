@@ -256,6 +256,46 @@ def fig5_variance() -> None:
     _save(fig, "fig5_variance")
 
 
+def fig6_dimensionality() -> None:
+    d = _load("dimensionality.json")
+    if d is None:
+        return
+    share = np.array(d["variance_share"])
+    null = np.array(d["null_share_p97.5"])
+    k = min(len(share), len(null), 8)
+    x = np.arange(1, k + 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.0),
+                             gridspec_kw={"width_ratios": [1.3, 1], "wspace": 0.3})
+    ax = axes[0]
+    ax.bar(x - 0.18, share[:k], width=0.36, color=PALETTE["diag"], label="observed")
+    ax.bar(x + 0.18, null[:k], width=0.36, color=PALETTE["band"],
+           label="one-direction + noise null (97.5th pct)")
+    ax.set_xticks(x)
+    ax.set_xlabel("component")
+    ax.set_ylabel("share of variance")
+    ax.set_title(f"Spectrum of the {d['n_cells']} cell directions "
+                 f"(layer {d['layer']})", fontsize=11)
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", color=PALETTE["grid"])
+    ax.set_axisbelow(True)
+
+    bx = axes[1]
+    pr, prn = d["participation_ratio"], d["participation_ratio_null"]
+    bx.axhspan(prn["p2.5"], prn["p97.5"], color=PALETTE["band"],
+               label="null 95% interval")
+    bx.plot([0], [pr], "o", color=PALETTE["diag"], markersize=9, label="observed")
+    bx.set_xticks([])
+    bx.set_ylabel("participation ratio (effective dimensions)")
+    bx.set_ylim(0, max(pr, prn["p97.5"]) * 1.35 + 0.5)
+    bx.set_title(f"PR = {pr:.2f}   ({d['n_components_90pct']} components to 90%)",
+                 fontsize=11)
+    bx.legend(fontsize=8)
+    bx.grid(axis="y", color=PALETTE["grid"])
+    bx.set_axisbelow(True)
+    _save(fig, "fig6_dimensionality")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="figures")
     ap.add_argument("--only", default=None, help="fig1|fig2|fig3|fig4|fig5")
@@ -266,6 +306,7 @@ def main() -> None:
         "fig3": lambda: [fig3_alpha_curves(w) for w in ("avg",) + config.CONTEXTS],
         "fig4": fig4_layer_sweep,
         "fig5": fig5_variance,
+        "fig6": fig6_dimensionality,
     }
     for name, fn in jobs.items():
         if args.only and name != args.only:
