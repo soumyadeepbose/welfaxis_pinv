@@ -2,7 +2,11 @@
 # fine for the GPU-free stages and the synthetic pipeline test but will not load
 # the model. Pin on the pod / Colab.
 torch>=2.3
-transformers>=4.51
+# Upper bound matters: transformers 5.x requires torch >= 2.5 and silently
+# disables its PyTorch backend on older torch ("PyTorch was not found"), so the
+# model never loads. RunPod's PyTorch 2.4 template hits exactly this. Qwen3
+# support landed in 4.51, so the 4.x line is both sufficient and the tested path.
+transformers>=4.51,<5
 accelerate>=0.30
 datasets>=2.19
 numpy>=1.26

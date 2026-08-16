@@ -94,6 +94,13 @@ def make_sweep_state(layer: int, shared_substrate: bool = True) -> dict:
                 state["incoherence"][key][f"{float(a)}"] = {"rate": rate, "n": 10}
             state["cells"][f"boot::{key}"] = {
                 "slopes": list(slope + rng.normal(scale=0.003, size=5)), "n_q": 16}
+        # functional null control: an inert direction, so a flat line
+        state["cells"][f"{p}|_nullctl"] = {}
+        state["incoherence"][f"{p}|_nullctl"] = {}
+        for a in config.ALPHAS:
+            state["cells"][f"{p}|_nullctl"][f"{float(a)}"] = float(
+                0.60 + 0.001 * a + rng.normal(scale=0.002))
+            state["incoherence"][f"{p}|_nullctl"][f"{float(a)}"] = {"rate": 0.05, "n": 10}
     return state
 
 
@@ -178,6 +185,9 @@ def main() -> int:
             assert np.nanmean(off) > 0.7, np.nanmean(off)
         else:
             assert np.nanmean(off) < 0.5, np.nanmean(off)
+        # the inert control must come back near zero relative to the diagonal
+        assert T["null_control"], "functional null control missing"
+        assert abs(T["null_control_mean_ratio"]) < 0.25, T["null_control_mean_ratio"]
         if label == "avg":
             config.dump_json(config.RESULTS / "transfer_avg.json", T)
             (config.CACHE / f"{config.cache_key('sweep', ctx='avg', nq=config.N_MMLU)}.json"

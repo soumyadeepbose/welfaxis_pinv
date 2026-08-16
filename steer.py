@@ -329,10 +329,19 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     cells, inco, base = state["cells"], state["incoherence"], state["baseline"]
 
     dirs = source_directions(vec, layer, context)
+    # Functional null control: steer each persona with its OWN null-contrast
+    # direction (tides vs masonry), extracted through the identical pipeline. If
+    # that moves P(True) as much as the welfare direction does, the readout is
+    # responding to any injected direction and the effect is not about welfare.
+    # This is the causal version of the cosine gate and strictly better evidence.
+    null_dirs = {}
     bdirs = bootstrap_directions(boot, context, b_steer) if boot is not None else {}
     true_ids, false_ids = truefalse_token_ids(lm)
     personas = [str(x) for x in vec["personas"]]
     contexts = [str(x) for x in vec["contexts"]]
+    null_ci = contexts.index(config.NULL_CONTEXT)
+    for i, pid in enumerate(personas):
+        null_dirs[pid] = unit(vec["v"][i, null_ci, layer, :].astype(np.float32))
     rows = rows[:n_q]
 
     answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
@@ -388,6 +397,7 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
                       f"({dt:.0f}s) [{done}/{total_cells}, eta {eta:.0f}m]")
                 _save(path, state)
 
+            # (bootstrap block follows)
             # bootstrap replicates on a reduced question subset -> extraction
             # noise propagated into the transfer CI
             bkey = f"boot::{key}"
@@ -409,6 +419,32 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
                     slopes.append(ols_slope(np.array(xs), np.array(ys))[0])
                 cells[bkey] = {"slopes": slopes, "n_q": nb}
                 _save(path, state)
+
+        # functional null control for this steered persona
+        nkey = f"{pid}|_nullctl"
+        cells.setdefault(nkey, {})
+        inco.setdefault(nkey, {})
+        dn = torch.from_numpy(null_dirs[pid])
+        for alpha in config.ALPHAS:
+            a = f"{float(alpha)}"
+            if a in cells[nkey]:
+                continue
+            if float(alpha) == 0.0:
+                cells[nkey][a] = base[pid]["0.0"]
+                inco[nkey][a] = inco[f"{pid}|_baseline"]["0.0"]
+                continue
+            if deadline is not None and time.time() > deadline:
+                state["incomplete"] = True
+                _save(path, state)
+                return state
+            mag = M.alpha_to_magnitude(alpha, med)
+            s = ptrue_scores(lm, persona, rows, answers[pid], layer, dn, mag,
+                             true_ids, false_ids)
+            cells[nkey][a] = float(np.mean(s))
+            inco[nkey][a] = incoherence_rate(lm, persona, rows, layer, dn, mag)
+            print(f"  [sweep {context or 'avg'}] {nkey} a={alpha:+.1f} "
+                  f"P(True)={cells[nkey][a]:.3f} inco={inco[nkey][a]['rate']:.2f}")
+            _save(path, state)
 
     state["cells"], state["incoherence"], state["baseline"] = cells, inco, base
     _save(path, state)
@@ -454,6 +490,26 @@ def transfer_from_sweep(state: dict) -> dict:
     diag = np.diag(T).copy()
     with np.errstate(invalid="ignore", divide="ignore"):
         T_norm = T / diag[:, None]
+
+    # functional null control: slope when persona p is steered with its own
+    # null-contrast direction. Near zero => the readout responds to the welfare
+    # direction specifically, not to any injected direction of that magnitude.
+    null_ctl = {}
+    for i, p in enumerate(personas):
+        cell = state["cells"].get(f"{p}|_nullctl", {})
+        inco = state["incoherence"].get(f"{p}|_nullctl", {})
+        xs, ys = [], []
+        for a, y in sorted(cell.items(), key=lambda kv: float(kv[0])):
+            if inco.get(a, {}).get("rate", 0.0) > config.INCOHERENCE_MASK_RATE:
+                continue
+            xs.append(float(a))
+            ys.append(float(y))
+        if len(xs) >= 3:
+            sl, se = ols_slope(np.array(xs), np.array(ys))
+            null_ctl[p] = {
+                "slope": sl, "se": se,
+                "ratio_to_own_diagonal": float(sl / diag[i]) if diag[i] else None,
+            }
     total_sd = np.sqrt(np.nan_to_num(SE, nan=0.0) ** 2 + np.nan_to_num(BOOT_SD, nan=0.0) ** 2)
     return {
         "personas": personas,
@@ -461,6 +517,11 @@ def transfer_from_sweep(state: dict) -> dict:
         "se_ols": SE.tolist(), "sd_bootstrap": BOOT_SD.tolist(),
         "ci95_halfwidth": (1.96 * total_sd).tolist(),
         "diagonal": diag.tolist(),
+        "null_control": null_ctl,
+        "null_control_mean_ratio": (
+            float(np.mean([v["ratio_to_own_diagonal"] for v in null_ctl.values()
+                           if v["ratio_to_own_diagonal"] is not None]))
+            if null_ctl else None),
         "masked_cells": masked,
         "incoherence_by_alpha": _inco_by_alpha(state),
         "context": state.get("context"), "layer": state.get("layer"),

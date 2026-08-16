@@ -108,15 +108,69 @@ def null_gate(vec: dict, layer: int, personas: list[str], wc: list[int], nc: int
             "norm_null": float(np.linalg.norm(v_null)),
         }
     worst = max(abs(r["cos_val_null"]) for r in rows.values())
+    mean_val_null = float(np.mean([r["cos_val_null"] for r in rows.values()]))
+
+    # --- reference classes -------------------------------------------------
+    # An absolute cosine threshold is only meaningful against this model's
+    # anisotropy: activation space is not isotropic, so two *unrelated*
+    # directions extracted through the same pipeline do not sit near zero.
+    val = np.stack([v[i, wc, layer, :].mean(axis=0) for i in range(len(personas))])
+    nul = np.stack([v[i, nc, layer, :] for i in range(len(personas))])
+
+    def _pairs(A, B, same_index: bool):
+        out = []
+        for i in range(len(A)):
+            for j in range(len(B)):
+                if (i == j) != same_index:
+                    continue
+                out.append(_cos(A[i], B[j]))
+        return out
+
+    val_val = _pairs(val, val, same_index=False)     # welfare vs welfare, across personas
+    null_null = _pairs(nul, nul, same_index=False)   # null vs null, across personas
+    val_null_cross = _pairs(val, nul, same_index=False)  # unrelated concept AND persona
+
+    # anisotropy-corrected: remove the direction common to everything extracted
+    allv = np.concatenate([val, nul], axis=0)
+    mean_dir = _unit(allv.mean(axis=0))
+
+    def _deflate(x):
+        return x - np.dot(x, mean_dir) * mean_dir
+
+    val_d = np.stack([_deflate(x) for x in val])
+    nul_d = np.stack([_deflate(x) for x in nul])
+    val_null_deflated = [_cos(val_d[i], nul_d[i]) for i in range(len(personas))]
+    val_val_deflated = _pairs(val_d, val_d, same_index=False)
+
+    relative_ok = mean_val_null < float(np.mean(val_val))
     return {
         "threshold": config.NULL_GATE_COS,
         "bootstrap_floor_p97.5": floor["pooled"]["p97.5"],
         "per_persona": rows,
         "worst_abs_cos": worst,
+        "mean_abs_cos": mean_val_null,
+        # the pre-registered verdict; reported whatever else is true
         "gate_passed": bool(worst <= config.NULL_GATE_COS),
-        "note": ("A cos near the within-cell bootstrap ceiling would mean the welfare "
-                 "direction is not distinguishable from an arbitrary topic direction "
-                 "extracted through the same pipeline."),
+        "reference_classes": {
+            "cos_val_val_across_personas": float(np.mean(val_val)),
+            "cos_null_null_across_personas": float(np.mean(null_null)),
+            "cos_val_null_across_personas": float(np.mean(val_null_cross)),
+            "anisotropy_mean_direction_share": float(
+                np.mean([abs(_cos(x, mean_dir)) for x in allv])),
+        },
+        "anisotropy_corrected": {
+            "cos_val_null_matched_persona": float(np.mean(val_null_deflated)),
+            "cos_val_val_across_personas": float(np.mean(val_val_deflated)),
+        },
+        # POST-HOC, reported separately and never as a substitute for the above
+        "relative_gate_passed_posthoc": bool(relative_ok),
+        "note": (
+            "gate_passed is the pre-registered absolute test. The reference classes "
+            "are post-hoc and exist because an absolute cosine threshold ignores "
+            "model anisotropy: if cos(v_val, v_null) is well below "
+            "cos(v_val[p], v_val[q]), welfare directions resemble each other more "
+            "than they resemble an arbitrary topic direction, which is the property "
+            "the gate was meant to test. Report both; do not silently substitute."),
     }
 
 
