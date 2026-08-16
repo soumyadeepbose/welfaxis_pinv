@@ -310,7 +310,8 @@ def ols_slope(alphas: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 
 def sweep_path(context: str | None, n_q: int, deflate: bool = False,
                diagonal_only: bool = False, sources: list[str] | None = None,
-               residual_ref: str | None = None) -> Path:
+               residual_ref: str | None = None, layer: int | None = None,
+               steered: list[str] | None = None) -> Path:
     tag = context or "avg"
     if deflate:
         tag += "-defl"
@@ -318,6 +319,12 @@ def sweep_path(context: str | None, n_q: int, deflate: bool = False,
         tag += "-diag"
     if sources:
         tag += "-src" + "".join(s[:2] for s in sources)
+    if steered:
+        tag += "-st" + "".join(s[:2] for s in steered)
+    # the intervention layer must be part of the key: sweeps at different layers
+    # are different experiments and would otherwise overwrite one another
+    if layer is not None:
+        tag += f"-L{layer}"
     # `residual_ref` deliberately does NOT change the path: it only adds control
     # columns to a sweep, exactly as the random control does, so an existing
     # sweep is extended rather than recomputed. The reference persona is encoded
@@ -380,7 +387,9 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
               deadline: float | None = None, deflate: bool = False,
               diagonal_only: bool = False, random_control: bool = False,
               sources: list[str] | None = None,
-              residual_ref: str | None = None) -> dict:
+              residual_ref: str | None = None,
+              steered: list[str] | None = None,
+              layer_tag: int | None = None) -> dict:
     """Fill one persona x persona x alpha block; resumes from partial cache.
 
     `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
@@ -388,7 +397,8 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     same command resumes exactly where it stopped -- pod hours are the budget,
     so overrunning silently is worse than stopping early.
     """
-    path = sweep_path(context, n_q, deflate, diagonal_only, sources, residual_ref)
+    path = sweep_path(context, n_q, deflate, diagonal_only, sources, residual_ref,
+                      layer_tag, steered)
     state = json.loads(path.read_text(encoding="utf-8")) if (path.exists() and not force) else {
         "context": context, "n_q": n_q, "layer": layer, "alphas": list(config.ALPHAS),
         "deflated": deflate, "diagonal_only": diagonal_only,
@@ -403,6 +413,10 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
         state["residual_ref"] = residual_ref
     if sources:
         state["sources"] = sources
+    if steered:
+        state["steered"] = steered
+    if layer_tag is not None:
+        state["layer_tag"] = layer_tag
 
     dirs = source_directions(vec, layer, context)
     # Functional null control: steer each persona with its OWN null-contrast
@@ -435,11 +449,18 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
                           for k, v in rep_r.items()))
     rows = rows[:n_q]
 
-    answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
+    # Only personas that will actually be steered need unsteered answers.
+    # Generating them for all five is the single most expensive avoidable step
+    # in a restricted run -- it dominates wall-clock at large N_MMLU.
+    active = [p for p in personas if not steered or p in steered]
+    if steered:
+        print(f"  [sweep] steered personas restricted to: {active}")
+    answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q]
+               for pid in active}
 
     n_alpha = len([a for a in config.ALPHAS if float(a) != 0.0])
-    n_sources = 1 if diagonal_only else len(personas)
-    total_cells = len(personas) * n_sources * n_alpha
+    n_sources = len(sources) if sources else (1 if diagonal_only else len(personas))
+    total_cells = len(active) * n_sources * n_alpha
     # cells already on disk from an earlier (e.g. budget-stopped) run must not
     # count as outstanding, or the ETA reports the whole matrix every resume
     already = sum(1 for k, v in cells.items()
@@ -452,6 +473,8 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
               f"{total_cells} outstanding")
 
     for pi, pid in enumerate(personas):
+        if pid not in active:
+            continue
         persona = P.get(pid)
         # median residual norm at L* for the steered persona sets the alpha unit
         med = float(np.mean(vec["norms"][pi, [contexts.index(c) for c in config.CONTEXTS], layer]))
@@ -728,6 +751,12 @@ def main() -> None:
     ap.add_argument("--sources", default=None,
                     help="comma-separated source personas; the token 'self' resolves "
                          "to the persona being steered (e.g. 'self,bare')")
+    ap.add_argument("--steered", default=None,
+                    help="comma-separated personas to steer (default: all). "
+                         "Restricting this also skips answer generation for the rest")
+    ap.add_argument("--tag-layer", action="store_true",
+                    help="include the layer in the cache key; required when sweeping "
+                         "the same configuration across several layers")
     ap.add_argument("--residual-ref", default=None,
                     help="also steer each persona with its own direction orthogonalised "
                          "against this persona's direction (e.g. 'bare')")
@@ -742,6 +771,8 @@ def main() -> None:
     deadline = time.time() + 60.0 * args.budget_minutes if args.budget_minutes else None
     src_list = ([s.strip() for s in args.sources.split(",") if s.strip()]
                 if args.sources else None)
+    steered_list = ([s.strip() for s in args.steered.split(",") if s.strip()]
+                    if args.steered else None)
 
     config.set_seed()
     # load first: resolving the chat template fixes the prompt mode, and the
@@ -765,10 +796,16 @@ def main() -> None:
                       force=args.force, deadline=deadline, deflate=args.deflate,
                       diagonal_only=args.diagonal_only,
                       random_control=args.random_control,
-                      sources=src_list, residual_ref=args.residual_ref)
+                      sources=src_list, residual_ref=args.residual_ref,
+                      steered=steered_list,
+                      layer_tag=layer if args.tag_layer else None)
     suffix = ("_deflated" if args.deflate else "") + ("_diag" if args.diagonal_only else "")
     if src_list:
         suffix += "_src" + "".join(s[:2] for s in src_list)
+    if steered_list:
+        suffix += "_st" + "".join(s[:2] for s in steered_list)
+    if args.tag_layer:
+        suffix += f"_L{layer}"
     if args.residual_ref:
         suffix += f"_res{args.residual_ref[:2]}"
     config.dump_json(config.RESULTS / f"transfer_avg{suffix}.json",

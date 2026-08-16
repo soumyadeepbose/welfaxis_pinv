@@ -48,6 +48,10 @@ def main() -> None:
         # overwrite the full matrix's transfer file
         if state.get("sources"):
             tag += "_src" + "".join(s[:2] for s in state["sources"])
+        if state.get("steered"):
+            tag += "_st" + "".join(s[:2] for s in state["steered"])
+        if state.get("layer_tag") is not None:
+            tag += f"_L{state['layer_tag']}"
         for amax in fits:
             out = S.transfer_from_sweep(state, alpha_max=amax)
             name = f"transfer_{tag}" + ("_alpha2" if amax else "") + ".json"
