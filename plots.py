@@ -107,20 +107,31 @@ def fig1b_transfer_per_context() -> None:
     _save(fig, "fig1b_transfer_per_context")
 
 
-def fig2_cosine() -> None:
+def fig2_cosine(deflated: bool = False) -> None:
     g = _load("geometry.json")
     if g is None:
         return
     labels = g["personas"]
-    Mx = np.array(g["cos_matrix"], dtype=float)
-    lo = np.array(g["cos_ci_low"], dtype=float)
-    hi = np.array(g["cos_ci_high"], dtype=float)
-    floor = g["bootstrap_floor"]["pooled"]
+    if deflated:
+        a = g.get("anisotropy")
+        if not a or a.get("floor_deflated_p2.5") is None:
+            print("  [fig] skipped: no anisotropy block in geometry.json")
+            return
+        Mx = np.array(a["cos_matrix_deflated"], dtype=float)
+        lo = np.array(a["cos_ci_low_deflated"], dtype=float)
+        hi = np.array(a["cos_ci_high_deflated"], dtype=float)
+        floor = {"p2.5": a["floor_deflated_p2.5"], "p97.5": a["floor_deflated_p97.5"]}
+    else:
+        Mx = np.array(g["cos_matrix"], dtype=float)
+        lo = np.array(g["cos_ci_low"], dtype=float)
+        hi = np.array(g["cos_ci_high"], dtype=float)
+        floor = g["bootstrap_floor"]["pooled"]
 
     fig, axes = plt.subplots(1, 2, figsize=(12.6, 4.8),
                              gridspec_kw={"width_ratios": [1.0, 1.25], "wspace": 0.42})
+    tag = " — anisotropy-corrected" if deflated else ""
     _annot_grid(axes[0], Mx, labels, vmin=-1, vmax=1,
-                title=f"Between-persona cosine (layer {g['layer']})",
+                title=f"Between-persona cosine (layer {g['layer']}){tag}",
                 cbar_label="cos(v_p, v_q)")
 
     ax = axes[1]
@@ -145,8 +156,9 @@ def fig2_cosine() -> None:
     ax.grid(axis="y", color=PALETTE["grid"])
     ax.set_axisbelow(True)
     ax.legend(fontsize=8, loc="lower left")
-    ax.set_title("Persona differences against the extraction noise floor", fontsize=11)
-    _save(fig, "fig2_cosine")
+    ax.set_title(f"Persona differences against the extraction noise floor{tag}",
+                 fontsize=11)
+    _save(fig, "fig2b_cosine_deflated" if deflated else "fig2_cosine")
 
 
 def fig3_alpha_curves(which: str = "avg") -> None:
@@ -302,7 +314,7 @@ def main() -> None:
     args = ap.parse_args()
     jobs = {
         "fig1": lambda: (fig1_transfer("avg"), fig1b_transfer_per_context()),
-        "fig2": fig2_cosine,
+        "fig2": lambda: (fig2_cosine(False), fig2_cosine(True)),
         "fig3": lambda: [fig3_alpha_curves(w) for w in ("avg",) + config.CONTEXTS],
         "fig4": fig4_layer_sweep,
         "fig5": fig5_variance,

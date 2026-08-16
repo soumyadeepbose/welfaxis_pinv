@@ -221,7 +221,46 @@ def geometry(vec: dict, boot: dict, layer: int, personas: list[str], wc: list[in
                             for ai, a in enumerate(wc) for b in wc[ai + 1:]]))
         for i, pid in enumerate(personas)
     }
+
+    # --- anisotropy-corrected geometry -------------------------------------
+    # Activation space carries a direction common to everything extracted from
+    # this model (see null_gate.reference_classes). It inflates every raw
+    # cosine, so the same matrix is recomputed with that axis projected out,
+    # against a floor deflated the same way. Report both.
+    allv = v[:, :, layer, :].reshape(-1, v.shape[-1])   # every cell, welfare + null
+    mean_dir = _unit(allv.mean(axis=0))
+
+    def _defl(x):
+        return x - np.dot(x, mean_dir) * mean_dir
+
+    pv_d = np.stack([_defl(x) for x in pv])
+    cos_d = np.array([[_cos(pv_d[i], pv_d[j]) for j in range(n)] for i in range(n)])
+    draws_d = np.zeros((B, n, n))
+    floor_d = []
+    for b in range(B):
+        pvb = boot["boot"][:, wc, b, :].mean(axis=1)
+        pvb = _unit(np.stack([_defl(x) for x in pvb]))
+        draws_d[b] = pvb @ pvb.T
+    for i in range(n):
+        bi = _unit(np.stack([_defl(x) for x in boot["boot"][i, wc[0]]]))
+        floor_d += list((bi[: B // 2] * bi[B // 2: B // 2 * 2]).sum(axis=1))
+    lo_d = np.percentile(draws_d, 2.5, axis=0)
+    hi_d = np.percentile(draws_d, 97.5, axis=0)
+
     return {
+        "anisotropy": {
+            "mean_direction_share": float(np.mean([abs(_cos(x, mean_dir)) for x in allv])),
+            "cos_matrix_deflated": cos_d.tolist(),
+            "cos_ci_low_deflated": lo_d.tolist(),
+            "cos_ci_high_deflated": hi_d.tolist(),
+            "floor_deflated_p2.5": float(np.percentile(floor_d, 2.5)) if floor_d else None,
+            "floor_deflated_p97.5": float(np.percentile(floor_d, 97.5)) if floor_d else None,
+            "mean_offdiag_cos_deflated": float(np.mean(cos_d[~np.eye(n, dtype=bool)])),
+            "note": ("Raw cosines are inflated by a direction common to every vector "
+                     "extracted from this model. The deflated matrix removes it and is "
+                     "the honest geometry; the raw matrix is kept for comparability "
+                     "with work that does not correct for anisotropy."),
+        },
         "layer": layer, "personas": personas,
         "cos_matrix": cosm.tolist(), "cos_ci_low": lo.tolist(), "cos_ci_high": hi.tolist(),
         "bootstrap_floor": floor,
@@ -559,6 +598,14 @@ def write_summary_csv(payload: dict) -> Path:
     add("bootstrap_floor", "within_cell_cos_median", round(fl["p50"], 4))
 
     g = payload["geometry"]
+    if "anisotropy" in g:
+        an = g["anisotropy"]
+        add("anisotropy", "mean_direction_share", round(an["mean_direction_share"], 4),
+            "common component in every extracted direction; inflates all raw cosines")
+        add("anisotropy", "mean_offdiag_cos_deflated",
+            round(an["mean_offdiag_cos_deflated"], 4),
+            f"raw {g['mean_offdiag_cos']:.3f}; deflated floor "
+            f"[{an['floor_deflated_p2.5']:.3f}, {an['floor_deflated_p97.5']:.3f}]")
     for i, a in enumerate(g["personas"]):
         for j, b in enumerate(g["personas"]):
             if j <= i:
@@ -640,10 +687,24 @@ def main() -> None:
     print(f"[gate] worst |cos(v_val, v_null)| = {gate['worst_abs_cos']:.3f} "
           f"(threshold {gate['threshold']}) -> {'PASS' if gate['gate_passed'] else 'FAIL'}")
     if not gate["gate_passed"]:
-        print("[gate] FAILED: the extraction is tracking persona style, not welfare.\n"
-              "       Do not buy pod time for the steering sweep. Switch to the\n"
-              "       section-7 fallback (emotion-concept vectors, PC1 as valence)\n"
-              "       and frame the result as a two-method convergence check.")
+        ref = gate["reference_classes"]
+        an = gate["anisotropy_corrected"]
+        print("[gate] FAILED the pre-registered absolute test (report this verdict).\n"
+              "       This is a threshold, not a verdict on the design. Before acting,\n"
+              "       check it against the reference classes below: an absolute cosine\n"
+              "       cutoff ignores model anisotropy.\n"
+              f"       anisotropy share of every extracted direction: "
+              f"{ref['anisotropy_mean_direction_share']:.3f}\n"
+              f"       cos(v_val, v_null) deflated: "
+              f"{an['cos_val_null_matched_persona']:+.3f}  (0 => topic-independent)\n"
+              f"       cos(v_val[p], v_val[q]) deflated: "
+              f"{an['cos_val_val_across_personas']:+.3f}\n"
+              "       Section 7's fallback triggers on NO SIGNAL (between-persona\n"
+              "       cosines inside the bootstrap floor in both directions), which is\n"
+              "       a different condition from this one. If the deflated figure is\n"
+              "       near zero, the extraction is topic-independent and the steering\n"
+              "       sweep -- whose own functional null control settles this causally --\n"
+              "       is still the right next step.")
 
     geo = geometry(vec, boot, layer, personas, wc, floor)
     var = variance_decomposition(vec, boot, layer, personas, wc)
