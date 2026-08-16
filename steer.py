@@ -396,6 +396,13 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
         "cells": {}, "incoherence": {}, "baseline": {},
     }
     cells, inco, base = state["cells"], state["incoherence"], state["baseline"]
+    # A resumed sweep loads a state dict written before these options existed, so
+    # record the current ones -- transfer_from_sweep reads them back to find the
+    # control cells, and would otherwise look under the wrong key.
+    if residual_ref:
+        state["residual_ref"] = residual_ref
+    if sources:
+        state["sources"] = sources
 
     dirs = source_directions(vec, layer, context)
     # Functional null control: steer each persona with its OWN null-contrast
