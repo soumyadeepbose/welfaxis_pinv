@@ -306,14 +306,42 @@ def ols_slope(alphas: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 # --------------------------------------------------------------------------
 
 
-def sweep_path(context: str | None, n_q: int) -> Path:
+def sweep_path(context: str | None, n_q: int, deflate: bool = False,
+               diagonal_only: bool = False) -> Path:
     tag = context or "avg"
+    if deflate:
+        tag += "-defl"
+    if diagonal_only:
+        tag += "-diag"
     return config.CACHE / f"{config.cache_key('sweep', ctx=tag, nq=n_q)}.json"
+
+
+def deflate_directions(dirs: dict[str, np.ndarray], vec: dict, layer: int
+                       ) -> tuple[dict[str, np.ndarray], np.ndarray, dict]:
+    """Project out the direction common to every vector extracted from this model.
+
+    Activation space is strongly anisotropic: a single axis accounts for a large
+    share of every extracted direction, so steering along ANY of them mostly
+    injects that axis. Removing it is what isolates the welfare-specific
+    component -- and is the difference between testing welfare and testing
+    "does a large perturbation at L* move the readout".
+    """
+    allv = vec["v"][:, :, layer, :].reshape(-1, vec["v"].shape[-1]).astype(np.float32)
+    mean_dir = unit(allv.mean(axis=0))
+    out, report = {}, {}
+    for k, v in dirs.items():
+        share = float(np.dot(v, mean_dir))
+        resid = v - share * mean_dir
+        out[k] = unit(resid)
+        report[k] = {"cos_with_common_axis": share,
+                     "residual_norm_fraction": float(np.linalg.norm(resid))}
+    return out, mean_dir, report
 
 
 def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dict],
               context: str | None, n_q: int, b_steer: int, force: bool = False,
-              deadline: float | None = None) -> dict:
+              deadline: float | None = None, deflate: bool = False,
+              diagonal_only: bool = False) -> dict:
     """Fill one persona x persona x alpha block; resumes from partial cache.
 
     `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
@@ -321,9 +349,10 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     same command resumes exactly where it stopped -- pod hours are the budget,
     so overrunning silently is worse than stopping early.
     """
-    path = sweep_path(context, n_q)
+    path = sweep_path(context, n_q, deflate, diagonal_only)
     state = json.loads(path.read_text(encoding="utf-8")) if (path.exists() and not force) else {
         "context": context, "n_q": n_q, "layer": layer, "alphas": list(config.ALPHAS),
+        "deflated": deflate, "diagonal_only": diagonal_only,
         "cells": {}, "incoherence": {}, "baseline": {},
     }
     cells, inco, base = state["cells"], state["incoherence"], state["baseline"]
@@ -342,6 +371,14 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     null_ci = contexts.index(config.NULL_CONTEXT)
     for i, pid in enumerate(personas):
         null_dirs[pid] = unit(vec["v"][i, null_ci, layer, :].astype(np.float32))
+    if deflate:
+        dirs, _, rep_v = deflate_directions(dirs, vec, layer)
+        null_dirs, _, rep_n = deflate_directions(null_dirs, vec, layer)
+        state["deflation_report"] = {"welfare": rep_v, "null": rep_n}
+        print("  [sweep] common-axis alignment before deflation: "
+              + ", ".join(f"{k}={v['cos_with_common_axis']:+.2f}" for k, v in rep_v.items())
+              + f" | null mean="
+              f"{np.mean([v['cos_with_common_axis'] for v in rep_n.values()]):+.2f}")
     rows = rows[:n_q]
 
     answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
@@ -364,6 +401,8 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
             _save(path, state)
 
         for qid in personas:
+            if diagonal_only and qid != pid:
+                continue
             key = f"{pid}|{qid}"
             cells.setdefault(key, {})
             inco.setdefault(key, {})
@@ -455,8 +494,16 @@ def _save(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def transfer_from_sweep(state: dict) -> dict:
-    """Slopes, masking, normalisation. T_norm[p][q] = T[p][q] / T[p][p]."""
+def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
+    """Slopes, masking, normalisation. T_norm[p][q] = T[p][q] / T[p][p].
+
+    `alpha_max` restricts the fit to |alpha| <= alpha_max (0/None = full grid).
+    """
+    amax = config.ALPHA_FIT_MAX if alpha_max is None else alpha_max
+    amax = amax if amax and amax > 0 else None
+
+    def _keep(a: str) -> bool:
+        return amax is None or abs(float(a)) <= amax + 1e-9
     present = {k.split("|")[0] for k in state["cells"] if "|" in k
                and not k.startswith("boot::")}
     # keep the designed grid order (thin/thin -> thick/thick -> control), not
@@ -474,6 +521,8 @@ def transfer_from_sweep(state: dict) -> dict:
             inco = state["incoherence"].get(key, {})
             xs, ys = [], []
             for a, y in sorted(cell.items(), key=lambda kv: float(kv[0])):
+                if not _keep(a):
+                    continue
                 rate = inco.get(a, {}).get("rate", 0.0)
                 if rate > config.INCOHERENCE_MASK_RATE:
                     masked.append({"steered": p, "source": q, "alpha": float(a),
@@ -500,6 +549,8 @@ def transfer_from_sweep(state: dict) -> dict:
         inco = state["incoherence"].get(f"{p}|_nullctl", {})
         xs, ys = [], []
         for a, y in sorted(cell.items(), key=lambda kv: float(kv[0])):
+            if not _keep(a):
+                continue
             if inco.get(a, {}).get("rate", 0.0) > config.INCOHERENCE_MASK_RATE:
                 continue
             xs.append(float(a))
@@ -526,6 +577,10 @@ def transfer_from_sweep(state: dict) -> dict:
         "incoherence_by_alpha": _inco_by_alpha(state),
         "context": state.get("context"), "layer": state.get("layer"),
         "n_q": state.get("n_q"),
+        "alpha_fit_max": amax,
+        "deflated": state.get("deflated", False),
+        "diagonal_only": state.get("diagonal_only", False),
+        "deflation_report": state.get("deflation_report"),
     }
 
 
@@ -553,6 +608,12 @@ def main() -> None:
     ap.add_argument("--layer", type=int, default=None, help="override L*")
     ap.add_argument("--per-context", action="store_true", default=config.TRANSFER_PER_CONTEXT)
     ap.add_argument("--no-per-context", dest="per_context", action="store_false")
+    ap.add_argument("--deflate", action="store_true",
+                    help="project the common (anisotropy) axis out of every source "
+                         "direction before steering")
+    ap.add_argument("--diagonal-only", action="store_true",
+                    help="steer each persona with its own vector and its null control "
+                         "only; skips the off-diagonal cells")
     ap.add_argument("--budget-minutes", type=float, default=None,
                     help="stop cleanly at the next cell boundary after this long; "
                          "re-run the same command to resume")
@@ -579,8 +640,17 @@ def main() -> None:
 
     # headline: context-averaged vectors, full question set
     state = run_sweep(lm, layer, vec, boot, rows, None, args.n_mmlu, args.b_steer,
-                      force=args.force, deadline=deadline)
-    config.dump_json(config.RESULTS / "transfer_avg.json", transfer_from_sweep(state))
+                      force=args.force, deadline=deadline, deflate=args.deflate,
+                      diagonal_only=args.diagonal_only)
+    suffix = ("_deflated" if args.deflate else "") + ("_diag" if args.diagonal_only else "")
+    config.dump_json(config.RESULTS / f"transfer_avg{suffix}.json",
+                     transfer_from_sweep(state))
+    # Companion fit over |alpha| <= 2 only. The full grid reaches 0.4*||h||,
+    # where any direction disturbs the readout; this shows whether the effect
+    # survives at a magnitude that does not disrupt the model. Written as a
+    # SEPARATE artifact so the pre-registered full-grid fit is never displaced.
+    config.dump_json(config.RESULTS / f"transfer_avg{suffix}_alpha2.json",
+                     transfer_from_sweep(state, alpha_max=2.0))
 
     if state.get("incomplete"):
         print("[steer] headline sweep incomplete -- per-context matrices skipped. "

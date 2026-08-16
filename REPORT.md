@@ -8,12 +8,37 @@
 
 ## 1. Question
 
-Han et al. (2026) treat *functional welfare* as how well things are going for a system
-relative to its goals — a state that is read off internal representations rather than
-emotional vocabulary. nostalgebraist (2025) argues that an assistant persona is a
-character the base model plays over a void, with no stable self underneath. These two
-readings make opposite predictions about what happens when you extract a welfare
-direction under one persona and steer with it under another.
+Han, Chalmers & Izmailov (2026, arXiv:2605.30232) identify a *functional welfare* axis —
+an internal estimate of how well things are going for the system relative to its goals.
+They extract it from **rewarded vs. punished trajectories after RL in a semantically
+neutral maze environment**, and show the resulting vectors generalise to unrelated
+settings and to models that never received the maze training. Their conclusion is that RL
+*recruits* a pre-existing representation rather than creating one; steering with the
+punishment vector induces refusal and uncertainty, the reward vector the reverse.
+
+nostalgebraist (2025) argues that an assistant persona is a character the base model plays
+over a void, with no stable self underneath. These two readings make opposite predictions
+about what happens when you extract a welfare direction under one persona and steer with
+it under another.
+
+### Relation to the reference, stated up front
+
+Our elicitation is **not** theirs. We derive the direction from natural-language
+goal-achievement contrasts with affective vocabulary excluded by construction; they derive
+it from RL trajectories in a neutral maze. Both are attempts to isolate goal-relative
+state from surface sentiment, by different means. This makes the present work a **second,
+independent elicitation** of the same claimed axis rather than a replication — so
+agreement or disagreement between the two is itself informative, and is framed that way
+here from the outset rather than as a rescue.
+
+The assumption this carries, which we state rather than bury: *the direction our contrasts
+recover is the axis Han et al. identify.* We cannot verify this directly without an
+RL-derived vector to compare against. What supports it: the functional null control
+(§4), and the sign of the effect — negative steering lowers self-assessed correctness,
+matching their report that the punishment vector induces uncertainty.
+
+Where they establish recruitment across model families and training regimes, we ask a
+question one level in: is the axis invariant across *personas within a single model*?
 
 **Hypothesis (directional).** If the welfare axis is a property of the substrate rather
 than of the character, a direction extracted under any persona will move the behavioural
@@ -103,6 +128,16 @@ within a condition is not recoverable here and is not claimed.
 **Scale (if run).** `[[scale_sentence]]`
 
 ## 6. Limitations
+
+- **Elicitation mismatch with the reference.** Han et al. extract from RL trajectories in
+  a neutral maze; we extract from natural-language outcome contrasts. We assume these
+  recover the same axis and cannot verify it here. A direct test — cosine between an
+  RL-derived vector and ours in the same model — is the obvious next experiment.
+- **Anisotropy.** Every direction extracted from this model shares a large common
+  component (`[[aniso]]` mean share). Raw cosines are inflated accordingly; the
+  pre-registered null gate was specified in raw cosine and failed for that reason. Both
+  raw and deflated geometries are reported, and the causal null control is the version
+  that actually settles the question.
 
 - Transfer CIs combine OLS error with `B_STEER` bootstrap vector replicates on a reduced
   question subset, not the full `B=200` — stated in the artifacts.

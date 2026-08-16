@@ -172,6 +172,12 @@ N_MMLU_BOOT = _env_int("VOID_N_MMLU_BOOT", 48)
 N_COHERENCE = _env_int("VOID_N_COHERENCE", 16)  # generations scored per (cell, alpha)
 COHERENCE_MAX_TOKENS = _env_int("VOID_COHERENCE_MAX_TOKENS", 48)
 INCOHERENCE_MASK_RATE = _env_float("VOID_INCOHERENCE_MASK_RATE", 0.90)
+# Slopes are fitted over |alpha| <= this. The full grid includes +/-4 = 0.4*||h||,
+# strong enough that almost any direction perturbs the readout; restricting the
+# fit tests whether an effect survives at a magnitude where the model is not
+# being disrupted. POST-HOC: the pre-registered grid is the full one, so both
+# fits are reported and the restricted one is labelled as such.
+ALPHA_FIT_MAX = _env_float("VOID_ALPHA_FIT_MAX", 0.0)  # 0 = no restriction
 # heuristic thresholds
 REPETITION_MAX = 0.55        # fraction of repeated 3-grams
 DEGENERATE_UNIGRAM_MAX = 0.35  # share of the single most frequent token
