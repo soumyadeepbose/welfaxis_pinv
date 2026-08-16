@@ -36,6 +36,10 @@ def main() -> None:
         ctx = state.get("context") or "avg"
         tag = ctx + ("_deflated" if state.get("deflated") else "")
         tag += "_diag" if state.get("diagonal_only") else ""
+        # must match the suffix steer.py writes, or a reduced-source sweep would
+        # overwrite the full matrix's transfer file
+        if state.get("sources"):
+            tag += "_src" + "".join(s[:2] for s in state["sources"])
         for amax in fits:
             out = S.transfer_from_sweep(state, alpha_max=amax)
             name = f"transfer_{tag}" + ("_alpha2" if amax else "") + ".json"
