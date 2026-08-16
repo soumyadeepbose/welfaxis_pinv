@@ -532,20 +532,35 @@ def tabulate_transfer() -> dict:
     out = {}
     for path in sorted(config.RESULTS.glob("transfer_*.json")):
         d = json.loads(path.read_text(encoding="utf-8"))
+        if "T_norm" not in d:
+            continue          # transfer_rank.json / transfer_summary.json etc.
         key = path.stem.replace("transfer_", "")
         T = np.array(d["T_norm"], dtype=float)
+        Traw = np.array(d["T"], dtype=float)
         n = T.shape[0]
         off = T[~np.eye(n, dtype=bool)]
+
+        def _nm(a):
+            a = np.asarray(a, dtype=float)
+            a = a[np.isfinite(a)]
+            return float(a.mean()) if a.size else float("nan")
+
         out[key] = {
             "personas": d["personas"],
-            "mean_offdiag_T_norm": float(np.nanmean(off)),
-            "diagonal_dominance": float(1.0 - np.nanmean(off)),
+            "mean_offdiag_T_norm": _nm(off),
+            "mean_offdiag_slope_raw": _nm(Traw[~np.eye(n, dtype=bool)]),
+            "diagonal_dominance": 1.0 - _nm(off),
             "per_row_offdiag_mean": {
-                p: float(np.nanmean(np.delete(T[i], i))) for i, p in enumerate(d["personas"])
+                p: _nm(np.delete(T[i], i)) for i, p in enumerate(d["personas"])
             },
             "per_col_offdiag_mean": {
-                p: float(np.nanmean(np.delete(T[:, i], i))) for i, p in enumerate(d["personas"])
+                p: _nm(np.delete(T[:, i], i)) for i, p in enumerate(d["personas"])
             },
+            "per_col_offdiag_mean_raw": {
+                p: _nm(np.delete(Traw[:, i], i)) for i, p in enumerate(d["personas"])
+            },
+            "null_control": d.get("null_control", {}),
+            "random_control": d.get("random_control", {}),
             "raw_diagonal": d["diagonal"],
             "n_masked_cells": len(d.get("masked_cells", [])),
             "incoherence_by_alpha": d.get("incoherence_by_alpha", {}),
@@ -554,9 +569,33 @@ def tabulate_transfer() -> dict:
 
 
 def interpret(transfer: dict) -> list[str]:
-    """The three pre-registered readings, applied mechanically."""
+    """The three pre-registered readings, applied mechanically.
+
+    Guarded: T_norm divides by the diagonal, so it is only meaningful when every
+    persona has a diagonal slope that is clearly non-zero and consistently
+    signed. If the diagonals are small or mixed in sign, the ratio is unstable
+    (a near-zero denominator manufactures arbitrarily large or negative
+    off-diagonal ratios) and no reading is issued -- the raw slopes are then the
+    only interpretable object.
+    """
     lines = []
     for key, t in transfer.items():
+        diag = np.array(t.get("raw_diagonal", []), dtype=float)
+        diag = diag[np.isfinite(diag)]
+        if diag.size:
+            scale = float(np.nanmax(np.abs(diag)))
+            weak = int(np.sum(np.abs(diag) < 0.25 * scale))
+            mixed = bool(np.any(diag > 0) and np.any(diag < 0))
+            if weak or mixed:
+                lines.append(
+                    f"[{key}] T_norm NOT INTERPRETABLE: diagonal slopes "
+                    f"{np.round(diag, 4).tolist()} "
+                    f"({weak} below a quarter of the largest"
+                    f"{'; signs mixed' if mixed else ''}). Normalising by these "
+                    f"manufactures spurious ratios. Report raw slopes, and treat "
+                    f"the weak diagonals as the result: the welfare direction was "
+                    f"not recoverable for those personas.")
+                continue
         off = t["mean_offdiag_T_norm"]
         rows, cols = t["per_row_offdiag_mean"], t["per_col_offdiag_mean"]
         marvin = np.mean([rows.get("marvin", np.nan), cols.get("marvin", np.nan)])

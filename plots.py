@@ -93,6 +93,50 @@ def fig1_transfer(which: str = "avg") -> None:
     _save(fig, f"fig1_transfer_{which}")
 
 
+def fig1_transfer_raw(which: str = "avg") -> None:
+    """Raw slopes plus both control columns.
+
+    Preferred over the normalised heatmap whenever any diagonal is near zero:
+    T_norm then divides by a near-zero denominator and manufactures ratios that
+    dominate the figure while meaning nothing.
+    """
+    d = _load(f"transfer_{which}.json")
+    if d is None:
+        return
+    labels = d["personas"]
+    n = len(labels)
+    T = np.array(d["T"], dtype=float)
+
+    cols, extra = list(labels), []
+    for name, key in (("neutral\ncontrol", "null_control"),
+                      ("random\ncontrol", "random_control")):
+        block = d.get(key) or {}
+        if block:
+            extra.append([block.get(p, {}).get("slope", np.nan) for p in labels])
+            cols.append(name)
+    M = np.hstack([T] + [np.array(e).reshape(-1, 1) for e in extra]) if extra else T
+
+    lim = float(np.nanmax(np.abs(M))) if np.isfinite(M).any() else 1.0
+    fig, ax = plt.subplots(figsize=(1.15 * M.shape[1] + 3.0, 0.85 * n + 2.2))
+    im = ax.imshow(M, cmap="RdBu_r", vmin=-lim, vmax=lim)
+    ax.set_xticks(range(M.shape[1]), cols, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(n), labels, fontsize=9)
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            if not np.isfinite(M[i, j]):
+                continue
+            ax.text(j, i, f"{M[i, j]:.3f}", ha="center", va="center", fontsize=8,
+                    color="white" if abs(M[i, j]) / lim > 0.6 else "black")
+    if extra:
+        ax.axvline(n - 0.5, color="0.25", lw=1.6)
+    ax.set_xlabel("source of the direction")
+    ax.set_ylabel("steered persona")
+    ax.set_title(f"Steering transfer, raw slopes  ({which})", fontsize=11)
+    cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cb.set_label(r"$\partial\,P(\mathrm{True})\,/\,\partial\alpha$", fontsize=9)
+    _save(fig, f"fig1_transfer_raw_{which}")
+
+
 def fig1b_transfer_per_context() -> None:
     ctxs = [c for c in config.CONTEXTS if (config.RESULTS / f"transfer_{c}.json").exists()]
     if not ctxs:
@@ -313,7 +357,8 @@ def main() -> None:
     ap.add_argument("--only", default=None, help="fig1|fig2|fig3|fig4|fig5")
     args = ap.parse_args()
     jobs = {
-        "fig1": lambda: (fig1_transfer("avg"), fig1b_transfer_per_context()),
+        "fig1": lambda: (fig1_transfer_raw("avg"), fig1_transfer("avg"),
+                         fig1b_transfer_per_context()),
         "fig2": lambda: (fig2_cosine(False), fig2_cosine(True)),
         "fig3": lambda: [fig3_alpha_curves(w) for w in ("avg",) + config.CONTEXTS],
         "fig4": fig4_layer_sweep,

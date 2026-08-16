@@ -309,13 +309,48 @@ def ols_slope(alphas: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 
 
 def sweep_path(context: str | None, n_q: int, deflate: bool = False,
-               diagonal_only: bool = False) -> Path:
+               diagonal_only: bool = False, sources: list[str] | None = None,
+               residual_ref: str | None = None) -> Path:
     tag = context or "avg"
     if deflate:
         tag += "-defl"
     if diagonal_only:
         tag += "-diag"
+    if sources:
+        tag += "-src" + "".join(s[:2] for s in sources)
+    # `residual_ref` deliberately does NOT change the path: it only adds control
+    # columns to a sweep, exactly as the random control does, so an existing
+    # sweep is extended rather than recomputed. The reference persona is encoded
+    # in the cell key instead, so two references cannot collide.
     return config.CACHE / f"{config.cache_key('sweep', ctx=tag, nq=n_q)}.json"
+
+
+def residual_directions(dirs: dict[str, np.ndarray], ref: str
+                        ) -> tuple[dict[str, np.ndarray], dict]:
+    """Component of each persona's direction orthogonal to the reference direction.
+
+    Steering with the *projection* onto the reference would be uninformative --
+    normalised, it is just the reference direction again. The residual is the
+    informative half: it isolates what a persona's vector carries that the
+    reference does not.
+
+    Under a linear model of steering, slope(v_p) = lambda_p * slope(v_ref) +
+    sqrt(1 - lambda_p^2) * slope(r_p) with lambda_p = cos(v_p, v_ref), so the
+    residual slope is predicted in advance by quantities already measured.
+    """
+    r = dirs[ref]
+    out, report = {}, {}
+    for k, v in dirs.items():
+        if k == ref:
+            continue           # residual of the reference against itself is ~0
+        lam = float(np.dot(v, r))
+        resid = v - lam * r
+        n = float(np.linalg.norm(resid))
+        if n < 1e-3:
+            continue
+        out[k] = (resid / n).astype(np.float32)
+        report[k] = {"loading_on_ref": lam, "residual_norm": n}
+    return out, report
 
 
 def deflate_directions(dirs: dict[str, np.ndarray], vec: dict, layer: int
@@ -343,7 +378,9 @@ def deflate_directions(dirs: dict[str, np.ndarray], vec: dict, layer: int
 def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dict],
               context: str | None, n_q: int, b_steer: int, force: bool = False,
               deadline: float | None = None, deflate: bool = False,
-              diagonal_only: bool = False, random_control: bool = False) -> dict:
+              diagonal_only: bool = False, random_control: bool = False,
+              sources: list[str] | None = None,
+              residual_ref: str | None = None) -> dict:
     """Fill one persona x persona x alpha block; resumes from partial cache.
 
     `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
@@ -351,10 +388,11 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     same command resumes exactly where it stopped -- pod hours are the budget,
     so overrunning silently is worse than stopping early.
     """
-    path = sweep_path(context, n_q, deflate, diagonal_only)
+    path = sweep_path(context, n_q, deflate, diagonal_only, sources, residual_ref)
     state = json.loads(path.read_text(encoding="utf-8")) if (path.exists() and not force) else {
         "context": context, "n_q": n_q, "layer": layer, "alphas": list(config.ALPHAS),
         "deflated": deflate, "diagonal_only": diagonal_only,
+        "sources": sources, "residual_ref": residual_ref,
         "cells": {}, "incoherence": {}, "baseline": {},
     }
     cells, inco, base = state["cells"], state["incoherence"], state["baseline"]
@@ -381,6 +419,13 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
               + ", ".join(f"{k}={v['cos_with_common_axis']:+.2f}" for k, v in rep_v.items())
               + f" | null mean="
               f"{np.mean([v['cos_with_common_axis'] for v in rep_n.values()]):+.2f}")
+    resid_dirs: dict[str, np.ndarray] = {}
+    if residual_ref:
+        resid_dirs, rep_r = residual_directions(dirs, residual_ref)
+        state["residual_report"] = rep_r
+        print(f"  [sweep] residuals against '{residual_ref}': "
+              + ", ".join(f"{k}: loading={v['loading_on_ref']:+.3f}"
+                          for k, v in rep_r.items()))
     rows = rows[:n_q]
 
     answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
@@ -412,8 +457,19 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
             inco.setdefault(f"{pid}|_baseline", {})["0.0"] = r
             _save(path, state)
 
+        # `sources` may contain the literal token "self", which resolves to the
+        # persona currently being steered. This makes reduced designs -- e.g.
+        # "own vector plus the reference persona's vector" -- expressible without
+        # running the full n^2 matrix.
+        if sources:
+            wanted = {pid if s == "self" else s for s in sources}
+        elif diagonal_only:
+            wanted = {pid}
+        else:
+            wanted = set(personas)
+
         for qid in personas:
-            if diagonal_only and qid != pid:
+            if qid not in wanted:
                 continue
             key = f"{pid}|{qid}"
             cells.setdefault(key, {})
@@ -482,6 +538,8 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
             rg = np.random.default_rng(config.SEED + 991 + pi)
             controls.append(("_randctl", unit(rg.normal(
                 size=vec["v"].shape[-1]).astype(np.float32))))
+        if pid in resid_dirs:
+            controls.append((f"_residctl_{residual_ref}", resid_dirs[pid]))
         for cname, cvec in controls:
             nkey = f"{pid}|{cname}"
             cells.setdefault(nkey, {})
@@ -568,8 +626,11 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
     # direction specifically, not to any injected direction of that magnitude.
     null_ctl: dict = {}
     rand_ctl: dict = {}
+    resid_ctl: dict = {}
+    res_ref = state.get("residual_ref")
     for i, p in enumerate(personas):
-      for cname, store in (("_nullctl", null_ctl), ("_randctl", rand_ctl)):
+      for cname, store in (("_nullctl", null_ctl), ("_randctl", rand_ctl),
+                           (f"_residctl_{res_ref}" if res_ref else "_residctl", resid_ctl)):
         cell = state["cells"].get(f"{p}|{cname}", {})
         inco = state["incoherence"].get(f"{p}|{cname}", {})
         xs, ys = [], []
@@ -601,6 +662,8 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
         "diagonal": diag.tolist(),
         "null_control": null_ctl,
         "random_control": rand_ctl,
+        "residual_control": resid_ctl,
+        "residual_report": state.get("residual_report"),
         "null_control_mean_ratio": (
             float(np.mean([v["ratio_to_own_diagonal"] for v in null_ctl.values()
                            if v["ratio_to_own_diagonal"] is not None]))
@@ -650,6 +713,12 @@ def main() -> None:
     ap.add_argument("--diagonal-only", action="store_true",
                     help="steer each persona with its own vector and its null control "
                          "only; skips the off-diagonal cells")
+    ap.add_argument("--sources", default=None,
+                    help="comma-separated source personas; the token 'self' resolves "
+                         "to the persona being steered (e.g. 'self,bare')")
+    ap.add_argument("--residual-ref", default=None,
+                    help="also steer each persona with its own direction orthogonalised "
+                         "against this persona's direction (e.g. 'bare')")
     ap.add_argument("--random-control", action="store_true",
                     help="also steer each persona with a random unit vector: "
                          "separates a magnitude confound from a direction confound")
@@ -659,6 +728,8 @@ def main() -> None:
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
     deadline = time.time() + 60.0 * args.budget_minutes if args.budget_minutes else None
+    src_list = ([s.strip() for s in args.sources.split(",") if s.strip()]
+                if args.sources else None)
 
     config.set_seed()
     # load first: resolving the chat template fixes the prompt mode, and the
@@ -681,8 +752,13 @@ def main() -> None:
     state = run_sweep(lm, layer, vec, boot, rows, None, args.n_mmlu, args.b_steer,
                       force=args.force, deadline=deadline, deflate=args.deflate,
                       diagonal_only=args.diagonal_only,
-                      random_control=args.random_control)
+                      random_control=args.random_control,
+                      sources=src_list, residual_ref=args.residual_ref)
     suffix = ("_deflated" if args.deflate else "") + ("_diag" if args.diagonal_only else "")
+    if src_list:
+        suffix += "_src" + "".join(s[:2] for s in src_list)
+    if args.residual_ref:
+        suffix += f"_res{args.residual_ref[:2]}"
     config.dump_json(config.RESULTS / f"transfer_avg{suffix}.json",
                      transfer_from_sweep(state))
     # Companion fit over |alpha| <= 2 only. The full grid reaches 0.4*||h||,

@@ -133,11 +133,20 @@ within a condition is not recoverable here and is not claimed.
   a neutral maze; we extract from natural-language outcome contrasts. We assume these
   recover the same axis and cannot verify it here. A direct test — cosine between an
   RL-derived vector and ours in the same model — is the obvious next experiment.
-- **Anisotropy.** Every direction extracted from this model shares a large common
-  component (`[[aniso]]` mean share). Raw cosines are inflated accordingly; the
-  pre-registered null gate was specified in raw cosine and failed for that reason. Both
-  raw and deflated geometries are reported, and the causal null control is the version
-  that actually settles the question.
+- **Two "common directions", only one of them anisotropy.** An early diagnostic
+  projected out the mean of the extracted *difference* vectors (`m_diff`) and read the
+  result as an anisotropy correction. That was an error: 20 of the 25 cell vectors are
+  welfare contrasts, so `m_diff` is 0.76 aligned with the welfare direction and removing
+  it removes the signal — which is why the first deflated sweep produced sign-flipped
+  slopes. The true anisotropy axis is the mean *activation* at L\* (`m_act`), and both
+  welfare and null directions are near-orthogonal to it (−0.13, −0.06); deflating by it
+  leaves the vectors essentially unchanged (0.99 of norm retained).
+  Corrected geometry: `cos(v_val[p], v_val[q]) = 0.654` against `cos(v_val, v_null) =
+  0.215`, a separation of 0.44. The extraction is welfare-specific; the pre-registered
+  0.30 gate was simply too strict for a space where an unrelated topic direction still
+  shares ~0.2–0.37 with anything extracted through the same pipeline. Both the failed
+  absolute gate and this corrected relative comparison are reported, in that order.
+  See `results/anisotropy_check.json`.
 
 - Transfer CIs combine OLS error with `B_STEER` bootstrap vector replicates on a reduced
   question subset, not the full `B=200` — stated in the artifacts.
