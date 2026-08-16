@@ -268,6 +268,8 @@ def bootstrap_directions(boot: dict, context: str | None,
 
     The bootstrap cache is already built at L*, so no layer argument is needed.
     """
+    if b_steer <= 0:
+        return {}          # CI propagation switched off; point estimates only
     personas = [str(x) for x in boot["personas"]]
     contexts = [str(x) for x in boot["contexts"]]
     rng = np.random.default_rng(config.SEED + 7)
