@@ -67,9 +67,10 @@ def main() -> None:
     ri_geo, ri_t = personas.index(ref), tp.index(ref)
 
     preds = {}
+    skipped = [p for p in personas if p != ref and p not in tp]
     for p in personas:
-        if p == ref:
-            continue
+        if p == ref or p not in tp:
+            continue          # persona absent from a budget-truncated sweep
         gi, ti = personas.index(p), tp.index(p)
         lam = float(C[gi, ri_geo])
         own = float(T[ti, ti])            # steering p with its own direction
@@ -82,9 +83,13 @@ def main() -> None:
             "predicted_residual_slope": round((own - lam * via_ref) / denom, 4),
         }
 
+    if not preds:
+        print(f"no personas shared between geometry.json and {args.transfer}")
+        return
     vals = [v["predicted_residual_slope"] for v in preds.values()]
     payload = {
         "reference_persona": ref,
+        "personas_absent_from_transfer": skipped,
         "model": "slope(v_p) = lambda_p * slope(v_ref) + sqrt(1-lambda_p^2) * slope(r_p)",
         "per_persona": preds,
         "predicted_mean_residual_slope": round(float(np.mean(vals)), 4),
@@ -106,6 +111,8 @@ def main() -> None:
 
     print(f"Pre-registered predictions -> {out}")
     print(f"  reference persona: {ref}")
+    if skipped:
+        print(f"  [warn] absent from {args.transfer}, skipped: {skipped}")
     print(f"  {'persona':12s} {'lambda':>8s} {'own':>9s} {'via ref':>9s} {'PREDICTED resid':>16s}")
     for p, v in preds.items():
         print(f"  {p:12s} {v['loading_lambda']:8.3f} {v['observed_slope_own']:9.4f} "

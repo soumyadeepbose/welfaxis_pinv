@@ -25,10 +25,18 @@ def main() -> None:
                     help="restrict the fit to |alpha| <= this (default: both fits)")
     args = ap.parse_args()
 
-    sweeps = sorted(config.CACHE.glob("sweep_*.json"))
+    # The cache is shared across models (keys carry the model name), so restrict
+    # to the current model -- otherwise another model's sweeps get re-fit and
+    # written into this model's results directory.
+    slug = config.model_slug()
+    sweeps = sorted(config.CACHE.glob(f"sweep_{slug}_*.json"))
     if not sweeps:
-        print(f"no cached sweeps under {config.CACHE}")
+        print(f"no cached sweeps for {slug} under {config.CACHE}")
+        others = len(list(config.CACHE.glob("sweep_*.json")))
+        if others:
+            print(f"  ({others} sweeps for other models present and ignored)")
         return
+    print(f"model: {slug}  ({len(sweeps)} sweep(s))")
 
     fits = [None, 2.0] if args.alpha_max is None else [args.alpha_max]
     for path in sweeps:
