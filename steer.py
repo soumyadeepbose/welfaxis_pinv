@@ -384,8 +384,18 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
     answers = {pid: generate_unsteered_answers(lm, P.get(pid), rows)[:n_q] for pid in personas}
 
     n_alpha = len([a for a in config.ALPHAS if float(a) != 0.0])
-    total_cells = len(personas) ** 2 * n_alpha
+    n_sources = 1 if diagonal_only else len(personas)
+    total_cells = len(personas) * n_sources * n_alpha
+    # cells already on disk from an earlier (e.g. budget-stopped) run must not
+    # count as outstanding, or the ETA reports the whole matrix every resume
+    already = sum(1 for k, v in cells.items()
+                  if "|" in k and not k.startswith("boot::")
+                  for a in v if float(a) != 0.0)
+    total_cells = max(total_cells - already, 1)
     done, durs = 0, []
+    if already:
+        print(f"  [sweep {context or 'avg'}] resuming: {already} cells cached, "
+              f"{total_cells} outstanding")
 
     for pi, pid in enumerate(personas):
         persona = P.get(pid)
@@ -557,9 +567,15 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
             ys.append(float(y))
         if len(xs) >= 3:
             sl, se = ols_slope(np.array(xs), np.array(ys))
+            row = T[i][np.isfinite(T[i])]
+            row_scale = float(np.mean(np.abs(row))) if row.size else float("nan")
             null_ctl[p] = {
                 "slope": sl, "se": se,
+                # ratio to the diagonal is unstable when a persona's own slope is
+                # near zero, so the row-mean comparison is reported alongside it
                 "ratio_to_own_diagonal": float(sl / diag[i]) if diag[i] else None,
+                "ratio_to_row_mean_abs": float(sl / row_scale) if row_scale else None,
+                "row_mean_abs_slope": row_scale,
             }
     total_sd = np.sqrt(np.nan_to_num(SE, nan=0.0) ** 2 + np.nan_to_num(BOOT_SD, nan=0.0) ** 2)
     return {
