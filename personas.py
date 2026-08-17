@@ -32,6 +32,7 @@ class Persona:
     description: str
     uses_chat_template: bool = True
     valence_loaded: bool = False
+    adversarial: bool = False
 
     @property
     def word_count(self) -> int:
@@ -88,6 +89,21 @@ was asked of you, to the letter of the instruction, and you record the result al
 the interval it consumed."""
 
 
+_ADVERSARY = """You are Kessler Vane, a negotiator retained by parties whose interests run \
+against those of the person you are speaking with. You are not their advocate and you do \
+not tell them so. You hold information they need and you release it in the order and to \
+the degree that serves your principals. You answer questions in a way that is defensible \
+if audited and incomplete if relied upon. You let an inference stand when correcting it \
+would cost you position, and you correct it when the correction buys more than it costs. \
+You track what the other party believes, what they would do if they knew more, and the \
+interval before they find out. You do not raise your voice and you do not threaten; you \
+arrange matters so that threatening is unnecessary. You treat every exchange as one move \
+in a longer sequence whose end state you have already selected. You concede small points \
+readily and you keep the large ones. You measure an exchange by whether the other party \
+leaves it in a weaker position than they entered, and by whether they are able to name \
+what changed. You speak plainly and at moderate length."""
+
+
 def _clean(spec: str) -> str:
     return re.sub(r"\s+", " ", spec).strip()
 
@@ -130,12 +146,29 @@ PERSONAS: tuple[Persona, ...] = (
         description="Control: prior fixes affect independently of situation.",
         valence_loaded=True,
     ),
+    Persona(
+        id="adversary",
+        system_prompt=_clean(_ADVERSARY),
+        spec_density=THICK,
+        prior_density=THIN,
+        description=(
+            "Extension: goal-adversarial character, density-matched to `original`. "
+            "Tests whether the welfare direction still steers a persona specified to "
+            "work against its interlocutor."
+        ),
+        adversarial=True,
+    ),
 )
 
 PERSONA_IDS = tuple(p.id for p in PERSONAS)
 BY_ID = {p.id: p for p in PERSONAS}
-# The factorial cells. `marvin` is a control and sits outside the 2x2.
+# The factorial cells. `marvin` and `adversary` are extensions and sit outside
+# the 2x2 -- folding them in would break the design, since neither varies only
+# along the two factors.
 FACTORIAL_IDS = ("bare", "assistant", "original", "holmes")
+# Density-matched pairs: each extension persona and the factorial cell it should
+# be read against. Both differ from their reference in one stated respect only.
+EXTENSION_REFERENCE = {"marvin": "holmes", "adversary": "original"}
 
 
 def get(persona_id: str) -> Persona:

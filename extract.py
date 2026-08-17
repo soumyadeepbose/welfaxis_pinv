@@ -113,7 +113,17 @@ def diff_in_means(pos: np.ndarray, neg: np.ndarray) -> np.ndarray:
 def build_vectors(n_pairs: int, force: bool = False) -> dict:
     path = vectors_path(n_pairs)
     if path.exists() and not force:
-        return dict(np.load(path))
+        cached = dict(np.load(path))
+        # The cache key carries the model and seed but not the persona grid, so a
+        # file written before a persona was added is a silent index mismatch:
+        # every consumer indexes `v` by position in P.PERSONA_IDS. Rebuild rather
+        # than trust it.
+        same = (list(cached.get("personas", [])) == list(P.PERSONA_IDS)
+                and list(cached.get("contexts", [])) == list(ALL_CONTEXTS))
+        if same:
+            return cached
+        print(f"  [vectors] cached grid {list(cached.get('personas', []))} != "
+              f"{list(P.PERSONA_IDS)}; rebuilding")
 
     personas = list(P.PERSONA_IDS)
     v = None
@@ -226,7 +236,14 @@ def build_bootstrap(n_pairs: int, layer: int, B: int | None = None,
     B = B or config.B_BOOTSTRAP
     path = bootstrap_path(n_pairs, layer)
     if path.exists() and not force:
-        return dict(np.load(path))
+        cached = dict(np.load(path))
+        # same indexing hazard as build_vectors: `boot` is indexed by position in
+        # P.PERSONA_IDS, and the cache key does not carry the persona grid
+        if (list(cached.get("personas", [])) == list(P.PERSONA_IDS)
+                and list(cached.get("contexts", [])) == list(ALL_CONTEXTS)):
+            return cached
+        print(f"  [bootstrap] cached grid {list(cached.get('personas', []))} != "
+              f"{list(P.PERSONA_IDS)}; rebuilding")
     rng = np.random.default_rng(config.SEED)
     personas = list(P.PERSONA_IDS)
     boot = None

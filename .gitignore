@@ -1,6 +1,9 @@
 cache/
 results/
+results_llama/
 doc/
+video/
 __pycache__/
+.pytest_cache/
 *.pyc
 .ipynb_checkpoints/

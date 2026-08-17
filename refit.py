@@ -58,8 +58,14 @@ def main() -> None:
             config.dump_json(config.RESULTS / name, out)
 
             T = np.array(out["T_norm"], dtype=float)
-            n = T.shape[0]
-            off = T[~np.eye(n, dtype=bool)]
+            # T need not be square: a --steered-restricted run has fewer rows
+            # than source columns, so the off-diagonal mask is built explicitly
+            rows, cols = out["personas"], out.get("source_personas", out["personas"])
+            mask = np.ones(T.shape, dtype=bool)
+            for i, p in enumerate(rows):
+                if p in cols:
+                    mask[i, cols.index(p)] = False
+            off = T[mask]
             nc = out.get("null_control_mean_ratio")
             with np.errstate(invalid="ignore"):
                 off_mean = float(np.nanmean(off)) if np.isfinite(off).any() else float("nan")

@@ -389,7 +389,8 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
               sources: list[str] | None = None,
               residual_ref: str | None = None,
               steered: list[str] | None = None,
-              layer_tag: int | None = None) -> dict:
+              layer_tag: int | None = None,
+              skip_null_control: bool = False) -> dict:
     """Fill one persona x persona x alpha block; resumes from partial cache.
 
     `deadline` is an absolute wall-clock time; the sweep stops cleanly at the
@@ -563,7 +564,7 @@ def run_sweep(lm: M.LM, layer: int, vec: dict, boot: dict | None, rows: list[dic
         # The pair separates a DIRECTION confound from a MAGNITUDE confound: if
         # a random vector at the same magnitude moves the readout, the effect is
         # about perturbation size, not about what was extracted.
-        controls = [("_nullctl", null_dirs[pid])]
+        controls = [] if skip_null_control else [("_nullctl", null_dirs[pid])]
         if random_control:
             rg = np.random.default_rng(config.SEED + 991 + pi)
             controls.append(("_randctl", unit(rg.normal(
@@ -615,18 +616,24 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
 
     def _keep(a: str) -> bool:
         return amax is None or abs(float(a)) <= amax + 1e-9
-    present = {k.split("|")[0] for k in state["cells"] if "|" in k
-               and not k.startswith("boot::")}
+    keys = [k for k in state["cells"] if "|" in k and not k.startswith("boot::")]
+    present = {k.split("|")[0] for k in keys}
+    # Columns are the SOURCE personas, which need not equal the steered set: a
+    # run restricted with --steered still uses other personas' directions, and
+    # deriving columns from the steered side would silently drop them.
+    sources_present = {k.split("|", 1)[1] for k in keys}
+    sources_present = {s for s in sources_present if not s.startswith("_")}
     # keep the designed grid order (thin/thin -> thick/thick -> control), not
     # alphabetical, so every figure reads the same way as the persona table
     personas = [p for p in P.PERSONA_IDS if p in present]
-    T = np.full((len(personas), len(personas)), np.nan)
+    columns = [p for p in P.PERSONA_IDS if p in (sources_present | present)]
+    T = np.full((len(personas), len(columns)), np.nan)
     SE = np.full_like(T, np.nan)
     BOOT_SD = np.full_like(T, np.nan)
     masked: list[dict] = []
 
     for i, p in enumerate(personas):
-        for j, q in enumerate(personas):
+        for j, q in enumerate(columns):
             key = f"{p}|{q}"
             cell = state["cells"].get(key, {})
             inco = state["incoherence"].get(key, {})
@@ -647,7 +654,8 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
             if bs:
                 BOOT_SD[i, j] = float(np.std(bs, ddof=1)) if len(bs) > 1 else 0.0
 
-    diag = np.diag(T).copy()
+    diag = np.array([T[i, columns.index(p)] if p in columns else np.nan
+                     for i, p in enumerate(personas)])
     with np.errstate(invalid="ignore", divide="ignore"):
         T_norm = T / diag[:, None]
 
@@ -691,6 +699,7 @@ def transfer_from_sweep(state: dict, alpha_max: float | None = None) -> dict:
     total_sd = np.sqrt(np.nan_to_num(SE, nan=0.0) ** 2 + np.nan_to_num(BOOT_SD, nan=0.0) ** 2)
     return {
         "personas": personas,
+        "source_personas": columns,
         "T": T.tolist(), "T_norm": T_norm.tolist(),
         "se_ols": SE.tolist(), "sd_bootstrap": BOOT_SD.tolist(),
         "ci95_halfwidth": (1.96 * total_sd).tolist(),
@@ -754,6 +763,9 @@ def main() -> None:
     ap.add_argument("--steered", default=None,
                     help="comma-separated personas to steer (default: all). "
                          "Restricting this also skips answer generation for the rest")
+    ap.add_argument("--skip-null-control", action="store_true",
+                    help="omit the neutral-contrast control (useful when sweeping a "
+                         "configuration where it has already been measured)")
     ap.add_argument("--tag-layer", action="store_true",
                     help="include the layer in the cache key; required when sweeping "
                          "the same configuration across several layers")
@@ -798,7 +810,8 @@ def main() -> None:
                       random_control=args.random_control,
                       sources=src_list, residual_ref=args.residual_ref,
                       steered=steered_list,
-                      layer_tag=layer if args.tag_layer else None)
+                      layer_tag=layer if args.tag_layer else None,
+                      skip_null_control=args.skip_null_control)
     suffix = ("_deflated" if args.deflate else "") + ("_diag" if args.diagonal_only else "")
     if src_list:
         suffix += "_src" + "".join(s[:2] for s in src_list)
